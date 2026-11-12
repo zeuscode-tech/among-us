@@ -1,4 +1,4 @@
-import { MAP, type MoveInput, type PlayerState, type RoomState } from "@among-us/shared";
+import { MAP, collides, type MoveInput, type PlayerState, type RoomState } from "@among-us/shared";
 
 interface InternalRoom {
   code: string;
@@ -123,11 +123,12 @@ function validateName(rawName: string): string {
 }
 
 function makePlayer(id: string, name: string, isHost: boolean, index: number): PlayerState {
+  const spawn = MAP.spawnPoints[index % MAP.spawnPoints.length]!;
   return {
     id,
     name,
-    x: 220 + (index % 5) * 70,
-    y: 360 + Math.floor(index / 5) * 70,
+    x: spawn.x,
+    y: spawn.y,
     color: COLORS[index % COLORS.length] ?? 0xffffff,
     isHost,
   };
@@ -139,14 +140,6 @@ function publicRoom(room: InternalRoom): RoomState {
 
 function isMoveInput(value: MoveInput): boolean {
   return !!value && [value.up, value.down, value.left, value.right].every((flag) => typeof flag === "boolean") && Number.isSafeInteger(value.sequence);
-}
-
-function collides(x: number, y: number): boolean {
-  return MAP.obstacles.some((obstacle) => {
-    const nearestX = clamp(x, obstacle.x, obstacle.x + obstacle.width);
-    const nearestY = clamp(y, obstacle.y, obstacle.y + obstacle.height);
-    return Math.hypot(x - nearestX, y - nearestY) < MAP.playerRadius;
-  });
 }
 
 function clamp(value: number, min: number, max: number): number {
