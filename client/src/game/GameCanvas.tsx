@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import Phaser from "phaser";
 import type { Socket } from "socket.io-client";
+import { createStationMap, type StationMapHandle } from "./map/StationRenderer";
 import { EVENTS, MAP, type MoveInput, type PlayerState, type RoomState } from "@among-us/shared";
 
 interface GameCanvasProps {
@@ -43,6 +44,7 @@ class MultiplayerScene extends Phaser.Scene {
   private sequence = 0;
   private lastSentAt = 0;
   private disposed = false;
+  private stationMap: StationMapHandle | undefined;
 
   constructor(
     private readonly socket: Socket,
@@ -57,12 +59,7 @@ class MultiplayerScene extends Phaser.Scene {
   create() {
     if (this.disposed) return;
     this.cameras.main.setBounds(0, 0, MAP.width, MAP.height);
-    this.add.rectangle(MAP.width / 2, MAP.height / 2, MAP.width, MAP.height, 0x0b1f33).setStrokeStyle(8, 0x38bdf8, 0.35);
-    this.add.grid(MAP.width / 2, MAP.height / 2, MAP.width, MAP.height, 40, 40, 0x0b1f33, 1, 0x163a57, 0.4);
-    for (const obstacle of MAP.obstacles) {
-      this.add.rectangle(obstacle.x + obstacle.width / 2, obstacle.y + obstacle.height / 2, obstacle.width, obstacle.height, 0x17324d)
-        .setStrokeStyle(3, 0x2dd4bf, 0.65);
-    }
+    this.stationMap = createStationMap(this);
     this.add.text(28, 24, "WASD / стрелки — движение", { fontFamily: "system-ui", fontSize: "20px", color: "#bae6fd" }).setScrollFactor(0).setDepth(100);
     this.cursors = this.input.keyboard?.createCursorKeys();
     if (this.input.keyboard) {
@@ -89,6 +86,7 @@ class MultiplayerScene extends Phaser.Scene {
 
   dispose() {
     this.disposed = true;
+    this.stationMap?.destroy();
     this.socket.off(EVENTS.GAME_SNAPSHOT, this.applySnapshot);
     this.socket.off(EVENTS.ROOM_STATE, this.applySnapshot);
   }

@@ -7,17 +7,8 @@ export const EVENTS = {
   ACTION_REJECTED: "action:rejected",
 } as const;
 
-export const MAP = {
-  width: 1200,
-  height: 760,
-  playerRadius: 18,
-  speed: 220,
-  obstacles: [
-    { x: 470, y: 250, width: 260, height: 180 },
-    { x: 120, y: 120, width: 180, height: 70 },
-    { x: 900, y: 560, width: 180, height: 70 },
-  ],
-} as const;
+export { STATION_MAP as MAP, collides, isInsideStation, roomAt } from "./map/station.js";
+export type { Box, Corridor, Door, Prop, PropKind, Room, RoomId, TaskSpot, TaskSpotKind, Vec } from "./map/station.js";
 
 export interface PlayerState {
   id: string;

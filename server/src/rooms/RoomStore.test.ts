@@ -20,9 +20,9 @@ test("joins a room and rejects a duplicate name", () => {
 test("server caps movement and transfers host on disconnect", () => {
   const store = new RoomStore(() => 0);
   const room = store.create("socket-1", "Captain");
-  store.join("socket-2", room.code, "Engineer");
+  const startX = store.join("socket-2", room.code, "Engineer").players.find((player) => player.id === "socket-2")?.x ?? 0;
   const moved = store.move("socket-2", { up: false, down: false, left: false, right: true, sequence: 1 }, 1000);
-  assert.ok((moved?.players.find((player) => player.id === "socket-2")?.x ?? 0) > 290);
+  assert.ok((moved?.players.find((player) => player.id === "socket-2")?.x ?? 0) > startX);
   const afterLeave = store.leave("socket-1");
   assert.equal(afterLeave?.players[0]?.isHost, true);
 });

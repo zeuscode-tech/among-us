@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/rooms/RoomStore.test.js",
+    "test": "node --test dist/rooms/RoomStore.test.js dist/rooms/StationMap.test.js",
     "start": "node dist/index.js"
   },
   "dependencies": {
