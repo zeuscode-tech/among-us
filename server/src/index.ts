@@ -1,75 +1,28 @@
-import "dotenv/config";
-import cors from "cors";
-import express from "express";
-import { createServer } from "node:http";
-import { Server } from "socket.io";
-import { EVENTS, type JoinRoomRequest, type MoveInput, type RoomAck, type RoomRequest } from "@among-us/shared";
-import { RoomError, RoomStore } from "./rooms/RoomStore.js";
+import { config } from "dotenv";
+import { fileURLToPath } from "node:url";
+import { createGameServer } from "./gameServer.js";
+import { DEFAULT_GAME_OPTIONS as defaults } from "./rooms/RoomStore.js";
 
-const port = Number(process.env.PORT ?? 3001);
-const clientOrigin = process.env.CLIENT_ORIGIN ?? "http://localhost:5173";
-const app = express();
-app.use(cors({ origin: clientOrigin }));
-app.use(express.json());
-app.get("/health", (_request, response) => response.json({ status: "ok", service: "among-us-server" }));
+config({ path: fileURLToPath(new URL("../../.env", import.meta.url)), quiet: true });
 
-const httpServer = createServer(app);
-const io = new Server(httpServer, { cors: { origin: clientOrigin, methods: ["GET", "POST"] } });
-const rooms = new RoomStore();
-
-io.on("connection", (socket) => {
-  console.info(`[socket] connected ${socket.id}`);
-
-  socket.on(EVENTS.ROOM_CREATE, (payload: RoomRequest, acknowledge: (result: RoomAck) => void) => {
-    runRoomAction(acknowledge, () => {
-      const room = rooms.create(socket.id, payload?.playerName ?? "");
-      socket.join(room.code);
-      io.to(room.code).emit(EVENTS.ROOM_STATE, room);
-      return room;
-    }, socket.id);
-  });
-
-  socket.on(EVENTS.ROOM_JOIN, (payload: JoinRoomRequest, acknowledge: (result: RoomAck) => void) => {
-    runRoomAction(acknowledge, () => {
-      const room = rooms.join(socket.id, payload?.roomCode ?? "", payload?.playerName ?? "");
-      socket.join(room.code);
-      io.to(room.code).emit(EVENTS.ROOM_STATE, room);
-      io.to(room.code).emit(EVENTS.GAME_SNAPSHOT, room);
-      return room;
-    }, socket.id);
-  });
-
-  socket.on(EVENTS.PLAYER_MOVE, (payload: MoveInput) => {
-    const room = rooms.move(socket.id, payload);
-    if (room) io.to(room.code).emit(EVENTS.GAME_SNAPSHOT, room);
-  });
-
-  socket.on("disconnect", () => {
-    const code = rooms.roomCodeFor(socket.id);
-    const room = rooms.leave(socket.id);
-    if (code && room) {
-      io.to(code).emit(EVENTS.ROOM_STATE, room);
-      io.to(code).emit(EVENTS.GAME_SNAPSHOT, room);
-    }
-    console.info(`[socket] disconnected ${socket.id}`);
-  });
+const port = integerEnv("PORT", 3001, 1, 65535);
+const server = createGameServer({
+  clientOrigin: process.env.CLIENT_ORIGIN ?? "http://localhost:5173",
+  game: {
+    minPlayers: integerEnv("MIN_PLAYERS", defaults.minPlayers, 2, 10),
+    discussionMs: integerEnv("DISCUSSION_DURATION_MS", defaults.discussionMs, 100, 600_000),
+    votingMs: integerEnv("VOTING_DURATION_MS", defaults.votingMs, 100, 600_000),
+    killCooldownMs: integerEnv("KILL_COOLDOWN_MS", defaults.killCooldownMs, 0, 600_000),
+  },
 });
 
-httpServer.listen(port, () => console.info(`Among Us server listening on http://localhost:${port}`));
+server.httpServer.listen(port, () => console.info(`Among Us server listening on http://localhost:${port}`));
+process.once("SIGINT", () => void server.close());
+process.once("SIGTERM", () => void server.close());
 
-function runRoomAction(
-  acknowledge: (result: RoomAck) => void,
-  action: () => ReturnType<RoomStore["create"]>,
-  playerId: string,
-): void {
-  try {
-    acknowledge({ ok: true, room: action(), playerId });
-  } catch (error) {
-    if (error instanceof RoomError) {
-      acknowledge({ ok: false, errorCode: error.code, message: error.message });
-      return;
-    }
-    console.error(error);
-    acknowledge({ ok: false, errorCode: "INTERNAL_ERROR", message: "Внутренняя ошибка сервера" });
-  }
+function integerEnv(name: string, fallback: number, min: number, max: number): number {
+  const value = process.env[name];
+  if (!value?.trim()) return fallback;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
 }
