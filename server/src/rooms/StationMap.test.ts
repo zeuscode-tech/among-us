@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MAP, collides, isInsideStation } from "@among-us/shared";
+import { MAP, TASK_RADIUS, collides, isInsideStation, withinReach } from "@among-us/shared";
 
 const STEP = 8;
-const TASK_DISTANCE = 65;
 
 /** Все точки сетки, до которых игрок может дойти от первого спавна. */
 function reachable(): Array<{ x: number; y: number }> {
@@ -49,7 +48,7 @@ test("до каждой комнаты можно дойти от спавна",
 
 test("каждая точка задания досягаема", () => {
   for (const spot of MAP.taskSpots) {
-    assert.ok(area.some((p) => Math.hypot(p.x - spot.x, p.y - spot.y) <= TASK_DISTANCE - 10), `задание ${spot.id} недосягаемо`);
+    assert.ok(area.some((p) => withinReach(p, spot, TASK_RADIUS - 10)), `задание ${spot.id} недосягаемо`);
   }
 });
 
