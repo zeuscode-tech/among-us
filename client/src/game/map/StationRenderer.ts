@@ -1,5 +1,5 @@
 import Phaser from "phaser";
-import { MAP, roomAt, type Box, type Prop, type Room, type TaskSpot } from "@among-us/shared";
+import { MAP, WALL, roomAt, type Box, type Prop, type Room, type TaskSpot } from "@among-us/shared";
 
 /**
  * Отрисовка карты «Орбитальная станция» целиком из кода — без внешних ассетов.
@@ -10,11 +10,10 @@ import { MAP, roomAt, type Box, type Prop, type Room, type TaskSpot } from "@amo
  * экраны, ядро реактора, голограммы и подпись комнаты при входе.
  */
 
-const WALL = 24;
 const DEPTH = { space: -100, nebula: -95, base: -40, light: -30, fx: -20, hud: 90 } as const;
 
 export interface StationMapHandle {
-  /** Подсветить точки заданий текущего игрока (Sprint 2). */
+  /** Подсветить точки заданий текущего игрока. */
   highlightTasks(spots: readonly TaskSpot[]): void;
   destroy(): void;
 }
@@ -50,6 +49,10 @@ export function createStationMap(scene: Phaser.Scene): StationMapHandle {
 
   // ── Свет ───────────────────────────────────────────────
   for (const room of MAP.rooms) {
+    keep(scene.add.text(room.x + room.width / 2, room.y + room.height * 0.69, room.label, {
+      fontFamily: "system-ui", fontSize: "20px", fontStyle: "bold", color: hex(room.accent),
+      stroke: "#091424", strokeThickness: 3,
+    }).setOrigin(0.5).setLetterSpacing(3).setAlpha(0.68).setDepth(DEPTH.base + 1));
     const light = keep(scene.add.image(room.x + room.width / 2, room.y + room.height / 2, "st-glow")
       .setScale(Math.max(room.width, room.height) / 150).setTint(room.accent).setAlpha(0.13)
       .setBlendMode(Phaser.BlendModes.ADD).setDepth(DEPTH.light));
@@ -105,7 +108,10 @@ export function createStationMap(scene: Phaser.Scene): StationMapHandle {
 
   return {
     highlightTasks(spots) {
-      for (const m of taskMarkers) m.destroy();
+      for (const marker of taskMarkers) {
+        scene.tweens.killTweensOf(marker);
+        marker.destroy();
+      }
       taskMarkers = spots.flatMap((s) => {
         const ring = scene.add.image(s.x, s.y, "st-ring").setTint(0xfde047).setDepth(DEPTH.fx).setBlendMode(Phaser.BlendModes.ADD);
         scene.tweens.add({ targets: ring, scale: { from: 0.6, to: 1.25 }, alpha: { from: 1, to: 0 }, duration: 1300, repeat: -1 });

@@ -204,13 +204,17 @@ export function collides(x: number, y: number, radius = PLAYER_RADIUS): boolean 
   return OBSTACLES.some((o) => {
     const nx = clamp(x, o.x, o.x + o.width);
     const ny = clamp(y, o.y, o.y + o.height);
-    return Math.hypot(x - nx, y - ny) < radius;
+    const dx = x - nx;
+    const dy = y - ny;
+    return dx * dx + dy * dy < radius * radius;
   });
 }
 
+const WALKABLE = [...ROOMS, ...CORRIDORS];
+
 /** Внутри ли точка комнаты или коридора (а не в открытом космосе). */
 export function isInsideStation(p: Vec): boolean {
-  return [...ROOMS, ...CORRIDORS].some((a) => p.x >= a.x && p.x <= a.x + a.width && p.y >= a.y && p.y <= a.y + a.height);
+  return WALKABLE.some((a) => p.x >= a.x && p.x <= a.x + a.width && p.y >= a.y && p.y <= a.y + a.height);
 }
 
 export function roomAt(p: Vec): Room | undefined {

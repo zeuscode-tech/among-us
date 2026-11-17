@@ -4,7 +4,7 @@
  * T — подсветить все точки заданий, ?zoom=0.4&x=1300&y=900 — стартовая позиция.
  */
 import Phaser from "phaser";
-import { MAP } from "@among-us/shared";
+import { MAP, TASK_RADIUS } from "@among-us/shared";
 import { createStationMap } from "./StationRenderer";
 
 class MapPreviewScene extends Phaser.Scene {
@@ -52,7 +52,7 @@ class MapPreviewScene extends Phaser.Scene {
     g.fillStyle(0xff0055, 0.35).lineStyle(1, 0xff0055, 1);
     for (const o of MAP.obstacles) { g.fillRect(o.x, o.y, o.width, o.height); g.strokeRect(o.x, o.y, o.width, o.height); }
     g.lineStyle(2, 0x22ff88, 1);
-    for (const t of MAP.taskSpots) g.strokeCircle(t.x, t.y, 65);
+    for (const t of MAP.taskSpots) g.strokeCircle(t.x, t.y, TASK_RADIUS);
   }
 }
 
