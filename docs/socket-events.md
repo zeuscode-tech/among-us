@@ -12,27 +12,29 @@ type GameAck<T> =
 
 | Событие | Payload | Успешный `data` и проверки |
 | --- | --- | --- |
-| `room:create` | `{ playerName }` | `{ room, playerId }`. Имя 2–20 символов, новый шестисимвольный код. |
-| `room:join` | `{ roomCode, playerName }` | `{ room, playerId }`. Лобби существует, есть место, имя уникально без учёта регистра. |
+| `room:create` | `{ playerName }` | `{ room, playerId, sessionToken }`. Имя 2–20 символов, новый шестисимвольный код. |
+| `room:join` | `{ roomCode, playerName }` | `{ room, playerId, sessionToken }`. Лобби существует, есть место, имя уникально без учёта регистра. |
+| `room:resume` | `{ sessionToken }` | Тот же `playerId`, токен, состояние комнаты, снимок и приватное состояние владельца. |
+| `room:map` | `{ mapId: "station" \| "abyss" }` | `null`. Только хост в лобби. При смене сбрасывает положение и Ready. |
 | `room:leave` | — | `null`. Удаление игрока, передача хоста и завершение матча при выполнении условий победы. |
 | `player:ready` | `{ ready: boolean }` | `null`. Своя готовность в лобби. |
 | `game:start` | — | `null`. Хост в лобби, допустимый состав, готовность гостей. |
-| `player:move` | `{ up, down, left, right, sequence }` | `null`. Живой игрок в `playing`, булевы флаги, целый возрастающий `sequence`, ограничение частоты. |
-| `task:interact` | `{ taskId }` | `TaskChallenge`. Живой владелец незавершённого задания в радиусе панели. Возвращает токен и порядок проводов или длительность заправки. |
-| `task:complete` | `{ taskId, proof }` | `null`. Текущий токен, та же панель, правильное решение или достаточное время, однократное завершение. |
+| `player:move` | `{ up, down, left, right, sequence }` | `null`. Живой игрок в `lobby` или `playing`, булевы флаги, целый возрастающий `sequence`, ограничение частоты. |
+| `task:interact` | `{ taskId }` | `TaskChallenge`. Живой владелец незавершённого задания в радиусе панели. Возвращает токен, тип задачи и её параметры. |
+| `task:complete` | `{ taskId, proof }` | `null`. Текущий токен, та же панель, правильное решение, однократное завершение. |
 | `player:kill` | `{ targetId }` | `null`. Живой предатель, живая мирная цель, допустимая дистанция, истёкший кулдаун. |
 | `body:report` | `{ bodyId }` | `null`. Живой игрок рядом с телом в `playing`. Фаза сразу меняется на `meeting`. |
 | `vote:cast` | `{ targetId: string \| null }` | `null`. Один голос живого участника в `voting` за живого игрока или Skip (`null`). |
 | `game:return` | — | `null`. Возврат всей комнаты из `ended` в `lobby`. Повторный запрос в лобби идемпотентен. |
 
-`TaskProof` для Wires содержит `{ kind: "wires", token, connections: number[] }`, где индекс слева соответствует индексу контакта справа. Для Fuel используется `{ kind: "fuel", token }`.
+`TaskProof` содержит `{ token, answer: number[] }`. Значение массива зависит от типа задачи. Сервер проверяет решение по исходным параметрам.
 
 ## Сервер → клиент
 
 | Событие | Аудитория | Payload |
 | --- | --- | --- |
-| `room:state` | Комната | `RoomState`: фаза, состав, общее число завершённых/назначенных задач, номер раунда, таймер, последний итог голосования и итог игры при наличии. |
-| `game:snapshot` | Комната | `GameSnapshot`: фаза, раунд, серверное время в мс, позиции, последние принятые `sequence`, тела. |
+| `room:state` | Комната | `RoomState`: фаза, карта, состав и состояние подключения, общее число завершённых/назначенных задач, номер раунда, таймер, последний итог голосования и итог игры при наличии. |
+| `game:snapshot` | Комната | `GameSnapshot`: фаза, раунд, серверное время в мс, идентификатор карты, позиции, последние принятые `sequence`, тела. |
 | `player:private-state` | Один сокет | `PrivateState`: своя роль и задания, время доступности Kill, отметка о собственном голосе. |
 | `task:progress` | Комната | `{ completed, total }` при завершении задания. |
 | `meeting:started` | Комната | `{ reporter, deadline }`. |
@@ -43,4 +45,4 @@ type GameAck<T> =
 
 ## Ошибки
 
-`INVALID_PAYLOAD`, `INVALID_NAME`, `ROOM_NOT_FOUND`, `ROOM_FULL`, `NAME_TAKEN`, `ALREADY_IN_ROOM`, `MATCH_ALREADY_STARTED`, `NOT_HOST`, `INVALID_PLAYER_COUNT`, `PLAYERS_NOT_READY`, `WRONG_PHASE`, `PLAYER_DEAD`, `NOT_IMPOSTOR`, `INVALID_TARGET`, `TOO_FAR`, `COOLDOWN`, `INVALID_TASK`, `ALREADY_VOTED`, `RATE_LIMIT`, `INTERNAL_ERROR`. Acknowledgment возвращает безопасное сообщение для игрока.
+`INVALID_PAYLOAD`, `INVALID_NAME`, `ROOM_NOT_FOUND`, `ROOM_FULL`, `NAME_TAKEN`, `ALREADY_IN_ROOM`, `SESSION_EXPIRED`, `MATCH_ALREADY_STARTED`, `NOT_HOST`, `INVALID_PLAYER_COUNT`, `PLAYERS_NOT_READY`, `WRONG_PHASE`, `PLAYER_DEAD`, `NOT_IMPOSTOR`, `INVALID_TARGET`, `TOO_FAR`, `COOLDOWN`, `INVALID_TASK`, `ALREADY_VOTED`, `RATE_LIMIT`, `INTERNAL_ERROR`. Acknowledgment возвращает безопасное сообщение для игрока.
