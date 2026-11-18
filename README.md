@@ -22,7 +22,7 @@ npm run dev
 | --- | --- |
 | `PORT` | `3001` |
 | `CLIENT_ORIGIN` | `http://localhost:5173` |
-| `VITE_SERVER_URL` | `http://localhost:3001` |
+| `VITE_SERVER_URL` | адрес страницы, порт `3001` |
 | `MIN_PLAYERS` | `4` |
 | `DISCUSSION_DURATION_MS` | `45000` |
 | `VOTING_DURATION_MS` | `30000` |
@@ -30,6 +30,14 @@ npm run dev
 | `SESSION_GRACE_MS` | `60000` |
 
 Для быстрой проверки можно выставить `DISCUSSION_DURATION_MS=10000`, `VOTING_DURATION_MS=10000` и `KILL_COOLDOWN_MS=2500`. С `MIN_PLAYERS=2` удобно проверять лобби, роли и движение. Для полного игрового цикла оставьте четырёх игроков.
+
+## Игра по Wi-Fi
+
+1. В `.env` укажите `CLIENT_ORIGIN=*` и не задавайте `VITE_SERVER_URL`. Клиент сам найдёт сервер на том компьютере, с которого открыта игра.
+2. Запустите `npm run dev` и узнайте IP компьютера, например `ipconfig getifaddr en0` на macOS.
+3. Все игроки в той же сети открывают `http://<IP>:5173`.
+
+`CLIENT_ORIGIN` принимает один адрес, несколько адресов через запятую или `*`.
 
 ## Локальный матч
 

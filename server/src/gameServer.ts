@@ -13,7 +13,7 @@ interface ServerOptions {
 const channel = (code: string) => `room:${code}`;
 
 export function createGameServer(options: ServerOptions = {}) {
-  const clientOrigin = options.clientOrigin ?? "http://localhost:5173";
+  const clientOrigin = parseOrigin(options.clientOrigin ?? "http://localhost:5173");
   const app = express();
   app.use(cors({ origin: clientOrigin }));
   app.get("/health", (_request, response) => response.json({ status: "ok", service: "among-us-server" }));
@@ -147,6 +147,13 @@ export function createGameServer(options: ServerOptions = {}) {
       await io.close();
     },
   };
+}
+
+/** CLIENT_ORIGIN: один адрес, несколько через запятую или "*" — пускать с любого адреса (игра по локальной сети). */
+function parseOrigin(value: string): string | string[] | true {
+  const origins = value.split(",").map((origin) => origin.trim()).filter(Boolean);
+  if (origins.includes("*")) return true;
+  return origins.length === 1 ? origins[0]! : origins;
 }
 
 function respond<T>(ack: Acknowledge<T> | undefined, action: () => T): void {
