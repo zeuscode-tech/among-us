@@ -1,55 +1,48 @@
 # Контракты Socket.IO
 
-Общие типы находятся в `shared/src/index.ts`. Все команды комнаты используют acknowledgment. Ошибки имеют безопасные `errorCode` и `message` без stack trace.
+Контракты типизированы в `shared/src/index.ts`. Команда подтверждается callback последним аргументом. Команды без payload принимают только callback. Высокочастотный `player:move` допускает отправку без callback.
 
-## Реализовано
+```ts
+type GameAck<T> =
+  | { ok: true; data: T }
+  | { ok: false; errorCode: ErrorCode; message: string };
+```
 
-### `room:create`
+## Клиент → сервер
 
-Клиент → сервер: `{ playerName: string }`.
+| Событие | Payload | Успешный `data` и проверки |
+| --- | --- | --- |
+| `room:create` | `{ playerName }` | `{ room, playerId, sessionToken }`. Имя 2–20 символов, новый шестисимвольный код. |
+| `room:join` | `{ roomCode, playerName }` | `{ room, playerId, sessionToken }`. Лобби существует, есть место, имя уникально без учёта регистра. |
+| `room:resume` | `{ sessionToken }` | Тот же `playerId`, токен, состояние комнаты, снимок и приватное состояние владельца. |
+| `room:map` | `{ mapId: "station" \| "abyss" }` | `null`. Только хост в лобби. При смене сбрасывает положение и Ready. |
+| `room:leave` | — | `null`. Удаление игрока, передача хоста и завершение матча при выполнении условий победы. |
+| `player:ready` | `{ ready: boolean }` | `null`. Своя готовность в лобби. |
+| `game:start` | — | `null`. Хост в лобби, допустимый состав, готовность гостей. |
+| `player:move` | `{ up, down, left, right, sequence }` | `null`. Живой игрок в `lobby` или `playing`, булевы флаги, целый возрастающий `sequence`, ограничение частоты. |
+| `task:interact` | `{ taskId }` | `TaskChallenge`. Живой владелец незавершённого задания в радиусе панели. Возвращает токен, тип задачи и её параметры. |
+| `task:complete` | `{ taskId, proof }` | `null`. Текущий токен, та же панель, правильное решение, однократное завершение. |
+| `player:kill` | `{ targetId }` | `null`. Живой предатель, живая мирная цель, допустимая дистанция, истёкший кулдаун. |
+| `body:report` | `{ bodyId }` | `null`. Живой игрок рядом с телом в `playing`. Фаза сразу меняется на `meeting`. |
+| `vote:cast` | `{ targetId: string \| null }` | `null`. Один голос живого участника в `voting` за живого игрока или Skip (`null`). |
+| `game:return` | — | `null`. Возврат всей комнаты из `ended` в `lobby`. Повторный запрос в лобби идемпотентен. |
 
-Проверки: 2–20 символов, допустимые буквы/цифры/пробел/`_`/`-`. Сервер создаёт код и делает инициатора хостом.
+`TaskProof` содержит `{ token, answer: number[] }`. Значение массива зависит от типа задачи. Сервер проверяет решение по исходным параметрам.
 
-### `room:join`
+## Сервер → клиент
 
-Клиент → сервер: `{ playerName: string, roomCode: string }`.
+| Событие | Аудитория | Payload |
+| --- | --- | --- |
+| `room:state` | Комната | `RoomState`: фаза, карта, состав и состояние подключения, общее число завершённых/назначенных задач, номер раунда, таймер, последний итог голосования и итог игры при наличии. |
+| `game:snapshot` | Комната | `GameSnapshot`: фаза, раунд, серверное время в мс, идентификатор карты, позиции, последние принятые `sequence`, тела. |
+| `player:private-state` | Один сокет | `PrivateState`: своя роль и задания, время доступности Kill, отметка о собственном голосе. |
+| `task:progress` | Комната | `{ completed, total }` при завершении задания. |
+| `meeting:started` | Комната | `{ reporter, deadline }`. |
+| `vote:result` | Комната | `VoteResult`: итог, исключённый игрок при наличии, подсчитанные голоса и Skip после закрытия бюллетеня. |
+| `game:ended` | Комната | `GameResult`: победитель, причина, роли и финальный состав. |
 
-Проверки: комната существует, меньше 10 игроков, имя уникально без учёта регистра.
+Таймеры передаются абсолютными метками времени в мс. До `ended` в общих событиях нет ролей. Во время голосования сервер сообщает о подаче голоса только проголосовавшему игроку.
 
-### Acknowledgment комнат
+## Ошибки
 
-Успех: `{ ok: true, room: RoomState, playerId: string }`.
-
-Ошибка: `{ ok: false, errorCode: string, message: string }`.
-
-Коды: `INVALID_NAME`, `ROOM_NOT_FOUND`, `ROOM_FULL`, `NAME_TAKEN`, `CODE_GENERATION_FAILED`, `INTERNAL_ERROR`.
-
-### `room:state`
-
-Сервер → комната: публичный `RoomState` после входа и выхода. Не должен содержать секретные роли.
-
-### `player:move`
-
-Клиент → сервер: `{ up, down, left, right: boolean, sequence: number }`. Сервер вычисляет координаты, ограничивает шаг, границы и препятствия.
-
-### `game:snapshot`
-
-Сервер → комната: текущий `RoomState` после принятого движения. В следующем Sprint снимок будет отделён от состояния лобби и дополнен `serverTime`/последовательностью.
-
-## Запланировано
-
-| Событие | Направление | Основная проверка |
-|---|---|---|
-| `player:ready` | C→S | только свой статус, lobby |
-| `game:start` | C→S | хост, 4–10 игроков |
-| `player:private-state` | S→C | роль и задания одному сокету |
-| `task:interact` | C→S | владелец, дистанция, playing |
-| `task:complete` | C→S | назначение, повтор, дистанция |
-| `player:kill` | C→S | роль, жизнь, цель, дистанция, cooldown |
-| `body:report` | C→S | тело существует, рядом, не репортилось |
-| `meeting:started` | S→room | публичный таймер и тело |
-| `vote:cast` | C→S | living, voting, один раз |
-| `vote:result` | S→room | итог без промежуточной утечки голосов |
-| `game:ended` | S→room | победитель и причина |
-
-Изменение события начинается с этого документа и `shared`, затем обновляются обе стороны и тесты.
+`INVALID_PAYLOAD`, `INVALID_NAME`, `ROOM_NOT_FOUND`, `ROOM_FULL`, `NAME_TAKEN`, `ALREADY_IN_ROOM`, `SESSION_EXPIRED`, `MATCH_ALREADY_STARTED`, `NOT_HOST`, `INVALID_PLAYER_COUNT`, `PLAYERS_NOT_READY`, `WRONG_PHASE`, `PLAYER_DEAD`, `NOT_IMPOSTOR`, `INVALID_TARGET`, `TOO_FAR`, `COOLDOWN`, `INVALID_TASK`, `ALREADY_VOTED`, `RATE_LIMIT`, `INTERNAL_ERROR`. Acknowledgment возвращает безопасное сообщение для игрока.
