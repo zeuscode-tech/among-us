@@ -1,3 +1,5 @@
+import type { TaskSpotKind } from "../tasks.js";
+
 /**
  * Карта «Орбитальная станция» — единая геометрия для клиента и сервера.
  *
@@ -9,9 +11,7 @@
 export interface Vec { x: number; y: number }
 export interface Box { x: number; y: number; width: number; height: number }
 
-export type RoomId =
-  | "cafeteria" | "lab" | "comms" | "reactor" | "storage"
-  | "navigation" | "electrical" | "admin";
+export type RoomId = string;
 
 export interface Room extends Box {
   id: RoomId;
@@ -39,7 +39,7 @@ export type PropKind =
 
 export interface Prop extends Box { kind: PropKind }
 
-export type TaskSpotKind = "wires" | "fuel";
+
 export interface TaskSpot extends Vec { id: string; kind: TaskSpotKind; roomId: RoomId }
 
 /** Толщина стены. */
@@ -112,15 +112,15 @@ export const PROPS: readonly Prop[] = [
   { kind: "locker",    x: 1720, y: 1682, width: 96,  height: 34 },
 ];
 
-/** Точки заданий. Сервер может раздавать игрокам случайные wires + fuel отсюда. */
+/** Точки заданий. На карте есть панель для каждого типа задачи. */
 export const TASK_SPOTS: readonly TaskSpot[] = [
-  { id: "wires-electrical", kind: "wires", roomId: "electrical", x: 1000, y: 1420 },
-  { id: "wires-admin",      kind: "wires", roomId: "admin",      x: 1420, y: 1690 },
-  { id: "wires-comms",      kind: "wires", roomId: "comms",      x: 2290, y: 560 },
-  { id: "wires-lab",        kind: "wires", roomId: "lab",        x: 590,  y: 190 },
-  { id: "fuel-reactor",     kind: "fuel",  roomId: "reactor",    x: 180,  y: 1040 },
-  { id: "fuel-storage",     kind: "fuel",  roomId: "storage",    x: 1450, y: 870 },
-  { id: "fuel-navigation",  kind: "fuel",  roomId: "navigation", x: 2300, y: 1220 },
+  { id: "trace-electrical", kind: "trace", roomId: "electrical", x: 1000, y: 1420 },
+  { id: "decode-admin",     kind: "decode", roomId: "admin",      x: 1420, y: 1690 },
+  { id: "echo-comms",       kind: "echo", roomId: "comms",      x: 2290, y: 560 },
+  { id: "sample-lab",       kind: "sample", roomId: "lab",        x: 590,  y: 190 },
+  { id: "balance-reactor",  kind: "balance",  roomId: "reactor",    x: 180,  y: 1040 },
+  { id: "spectrum-storage", kind: "spectrum",  roomId: "storage",    x: 1450, y: 870 },
+  { id: "orbit-navigation", kind: "orbit",  roomId: "navigation", x: 2300, y: 1220 },
 ];
 
 /** 10 мест появления: две ряда по пять в центре столовой. */
@@ -145,15 +145,18 @@ const touchSide = (c: Corridor, r: Room): Side | null => {
 };
 
 /** Проёмы в стенах комнат там, где примыкают коридоры. */
-export const DOORS: readonly Door[] = CORRIDORS.flatMap((c) =>
-  ROOMS.flatMap((r) => {
-    const side = touchSide(c, r);
-    if (!side) return [];
-    const [from, to] = c.axis === "h" ? [c.y + WALL, c.y + c.height - WALL] : [c.x + WALL, c.x + c.width - WALL];
-    return [{ roomId: r.id, side, from, to, corridorId: c.id }];
-  }),
-);
-
+function buildDoors(rooms: readonly Room[], corridors: readonly Corridor[]): Door[] {
+  return corridors.flatMap((corridor) =>
+    rooms.flatMap((room) => {
+      const side = touchSide(corridor, room);
+      if (!side) return [];
+      const [from, to] = corridor.axis === "h"
+        ? [corridor.y + WALL, corridor.y + corridor.height - WALL]
+        : [corridor.x + WALL, corridor.x + corridor.width - WALL];
+      return [{ roomId: room.id, side, from, to, corridorId: corridor.id }];
+    }),
+  );
+}
 /** Вычитает проёмы из отрезка [a, b]. */
 function cut(a: number, b: number, holes: Array<[number, number]>): Array<[number, number]> {
   const out: Array<[number, number]> = [];
@@ -166,11 +169,11 @@ function cut(a: number, b: number, holes: Array<[number, number]>): Array<[numbe
   return out;
 }
 
-function buildWalls(): Box[] {
+function buildWalls(rooms: readonly Room[], corridors: readonly Corridor[], doors: readonly Door[]): Box[] {
   const walls: Box[] = [];
-  for (const r of ROOMS) {
+  for (const r of rooms) {
     const holes = (side: Side) =>
-      DOORS.filter((d) => d.roomId === r.id && d.side === side).map((d): [number, number] => [d.from, d.to]);
+      doors.filter((d) => d.roomId === r.id && d.side === side).map((d): [number, number] => [d.from, d.to]);
     const right = r.x + r.width;
     const bottom = r.y + r.height;
     for (const [a, b] of cut(r.x, right, holes("top"))) walls.push({ x: a, y: r.y, width: b - a, height: WALL });
@@ -178,7 +181,7 @@ function buildWalls(): Box[] {
     for (const [a, b] of cut(r.y, bottom, holes("left"))) walls.push({ x: r.x, y: a, width: WALL, height: b - a });
     for (const [a, b] of cut(r.y, bottom, holes("right"))) walls.push({ x: right - WALL, y: a, width: WALL, height: b - a });
   }
-  for (const c of CORRIDORS) {
+  for (const c of corridors) {
     if (c.axis === "h") {
       walls.push({ x: c.x, y: c.y, width: c.width, height: WALL }, { x: c.x, y: c.y + c.height - WALL, width: c.width, height: WALL });
     } else {
@@ -188,20 +191,17 @@ function buildWalls(): Box[] {
   return walls;
 }
 
-/** Стены (для отрисовки). */
-export const WALLS: readonly Box[] = buildWalls();
-
-/** Всё твёрдое: стены + мебель. Это и есть `MAP.obstacles`. */
-export const OBSTACLES: readonly Box[] = [
-  ...WALLS,
-  ...PROPS.map(({ x, y, width, height }) => ({ x, y, width, height })),
-];
-
+export function buildGeometry(rooms: readonly Room[], corridors: readonly Corridor[], props: readonly Prop[]) {
+  const doors = buildDoors(rooms, corridors);
+  const walls = buildWalls(rooms, corridors, doors);
+  const obstacles: readonly Box[] = [...walls, ...props];
+  return { doors, walls, obstacles, walkable: [...rooms, ...corridors] };
+}
 const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
 
 /** Пересекает ли круг игрока (центр x, y) хоть одно препятствие. Та же формула, что на сервере. */
-export function collides(x: number, y: number, radius = PLAYER_RADIUS): boolean {
-  return OBSTACLES.some((o) => {
+export function collides(x: number, y: number, radius = PLAYER_RADIUS, map: typeof STATION_MAP = STATION_MAP): boolean {
+  return map.obstacles.some((o) => {
     const nx = clamp(x, o.x, o.x + o.width);
     const ny = clamp(y, o.y, o.y + o.height);
     const dx = x - nx;
@@ -210,28 +210,25 @@ export function collides(x: number, y: number, radius = PLAYER_RADIUS): boolean 
   });
 }
 
-const WALKABLE = [...ROOMS, ...CORRIDORS];
-
 /** Внутри ли точка комнаты или коридора (а не в открытом космосе). */
-export function isInsideStation(p: Vec): boolean {
-  return WALKABLE.some((a) => p.x >= a.x && p.x <= a.x + a.width && p.y >= a.y && p.y <= a.y + a.height);
+export function isInsideStation(p: Vec, map: typeof STATION_MAP = STATION_MAP): boolean {
+  return map.walkable.some((a) => p.x >= a.x && p.x <= a.x + a.width && p.y >= a.y && p.y <= a.y + a.height);
 }
 
-export function roomAt(p: Vec): Room | undefined {
-  return ROOMS.find((r) => p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height);
+export function roomAt(p: Vec, map: typeof STATION_MAP = STATION_MAP): Room | undefined {
+  return map.rooms.find((r) => p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height);
 }
 
 export const STATION_MAP = {
+  id: "station" as "station" | "abyss",
   width: MAP_WIDTH,
   height: MAP_HEIGHT,
   playerRadius: PLAYER_RADIUS,
   speed: PLAYER_SPEED,
-  obstacles: OBSTACLES,
   spawnPoints: SPAWN_POINTS,
   rooms: ROOMS,
   corridors: CORRIDORS,
-  doors: DOORS,
-  walls: WALLS,
   props: PROPS,
   taskSpots: TASK_SPOTS,
-} as const;
+  ...buildGeometry(ROOMS, CORRIDORS, PROPS),
+};

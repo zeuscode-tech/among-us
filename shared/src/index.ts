@@ -1,8 +1,17 @@
+import type { MapId } from "./map/maps.js";
+import type { TaskChallenge, TaskProof } from "./tasks.js";
+
 export { STATION_MAP as MAP, collides, isInsideStation, roomAt, WALL } from "./map/station.js";
-export type { Box, Corridor, Door, Prop, PropKind, Room, RoomId, TaskSpot, TaskSpotKind, Vec } from "./map/station.js";
+export type { Box, Corridor, Door, Prop, PropKind, Room, RoomId, TaskSpot, Vec } from "./map/station.js";
+export { GAME_MAPS, MAP_INFO, isMapId } from "./map/maps.js";
+export type { GameMap, MapId } from "./map/maps.js";
+export { TASKS } from "./tasks.js";
+export type { Puzzle, TaskChallenge, TaskProof, TaskSpotKind } from "./tasks.js";
 export { movePosition, withinReach } from "./movement.js";
 
 export const EVENTS = {
+  ROOM_RESUME: "room:resume",
+  ROOM_MAP: "room:map",
   ROOM_CREATE: "room:create",
   ROOM_JOIN: "room:join",
   ROOM_LEAVE: "room:leave",
@@ -29,8 +38,6 @@ export const INPUT_INTERVAL_MS = 50;
 export const TASK_RADIUS = 65;
 export const KILL_RADIUS = 92;
 export const REPORT_RADIUS = 120;
-export const WIRE_COLORS = ["red", "blue", "yellow", "purple"] as const;
-export type WireColor = (typeof WIRE_COLORS)[number];
 
 export type GamePhase = "lobby" | "starting" | "playing" | "meeting" | "voting" | "ended";
 export type Role = "crew" | "impostor";
@@ -42,6 +49,7 @@ export interface PlayerState {
   color: number;
   isHost: boolean;
   ready: boolean;
+  connected: boolean;
   alive: boolean;
 }
 
@@ -76,6 +84,7 @@ export interface GameResult {
 
 export interface RoomState {
   code: string;
+  mapId: MapId;
   players: PlayerState[];
   minPlayers: number;
   maxPlayers: number;
@@ -97,6 +106,7 @@ export interface BodyState {
 
 export interface GameSnapshot {
   code: string;
+  mapId: MapId;
   round: number;
   phase: GamePhase;
   serverTime: number;
@@ -119,14 +129,6 @@ export interface PrivateState {
   hasVoted: boolean;
 }
 
-export type TaskChallenge =
-  | { kind: "wires"; token: string; left: WireColor[]; right: WireColor[] }
-  | { kind: "fuel"; token: string; holdMs: number };
-
-export type TaskProof =
-  | { kind: "wires"; token: string; connections: number[] }
-  | { kind: "fuel"; token: string };
-
 export type MovementDirection = Record<"up" | "down" | "left" | "right", boolean>;
 export interface MoveInput extends MovementDirection {
   sequence: number;
@@ -134,14 +136,15 @@ export interface MoveInput extends MovementDirection {
 
 export interface RoomRequest { playerName: string }
 export interface JoinRoomRequest extends RoomRequest { roomCode: string }
-export interface RoomMembership { room: RoomState; playerId: string }
+export interface RoomMembership { room: RoomState; playerId: string; sessionToken: string }
+export interface ResumedMembership extends RoomMembership { snapshot: GameSnapshot; privateState: PrivateState }
 
 export type ErrorCode =
   | "INVALID_PAYLOAD" | "INVALID_NAME" | "ROOM_NOT_FOUND" | "ROOM_FULL" | "NAME_TAKEN"
   | "MATCH_ALREADY_STARTED" | "NOT_HOST" | "INVALID_PLAYER_COUNT" | "PLAYERS_NOT_READY"
   | "WRONG_PHASE" | "PLAYER_DEAD" | "NOT_IMPOSTOR" | "INVALID_TARGET" | "TOO_FAR"
   | "COOLDOWN" | "INVALID_TASK" | "ALREADY_VOTED" | "RATE_LIMIT" | "INTERNAL_ERROR"
-  | "ALREADY_IN_ROOM";
+  | "ALREADY_IN_ROOM" | "SESSION_EXPIRED";
 
 export type GameAck<T> =
   | { ok: true; data: T }
@@ -150,6 +153,8 @@ export type GameAck<T> =
 export type Acknowledge<T = null> = (ack: GameAck<T>) => void;
 
 export interface ClientEvents {
+  [EVENTS.ROOM_RESUME]: (request: { sessionToken: string }, ack: Acknowledge<ResumedMembership>) => void;
+  [EVENTS.ROOM_MAP]: (request: { mapId: MapId }, ack: Acknowledge) => void;
   [EVENTS.ROOM_CREATE]: (request: RoomRequest, ack: Acknowledge<RoomMembership>) => void;
   [EVENTS.ROOM_JOIN]: (request: JoinRoomRequest, ack: Acknowledge<RoomMembership>) => void;
   [EVENTS.ROOM_LEAVE]: (ack: Acknowledge) => void;
