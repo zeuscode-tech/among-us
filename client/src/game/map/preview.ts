@@ -4,8 +4,12 @@
  * T — подсветить все точки заданий, ?zoom=0.4&x=1300&y=900 — стартовая позиция.
  */
 import Phaser from "phaser";
-import { MAP, TASK_RADIUS } from "@among-us/shared";
+import { GAME_MAPS, isMapId, TASK_RADIUS } from "@among-us/shared";
 import { createStationMap } from "./StationRenderer";
+
+const q = new URLSearchParams(location.search);
+const mapId = q.get("map");
+const MAP = GAME_MAPS[isMapId(mapId) ? mapId : "station"];
 
 class MapPreviewScene extends Phaser.Scene {
   private keys!: Record<"w" | "a" | "s" | "d" | "up" | "down" | "left" | "right", Phaser.Input.Keyboard.Key>;
@@ -16,8 +20,7 @@ class MapPreviewScene extends Phaser.Scene {
   create() {
     const cam = this.cameras.main;
     cam.setBounds(-400, -400, MAP.width + 800, MAP.height + 800);
-    const map = createStationMap(this);
-    const q = new URLSearchParams(location.search);
+    const map = createStationMap(this, MAP, false);
     cam.setZoom(Number(q.get("zoom") ?? 0.45));
     cam.centerOn(Number(q.get("x") ?? MAP.width / 2), Number(q.get("y") ?? MAP.height / 2));
 

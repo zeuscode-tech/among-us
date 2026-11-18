@@ -1,5 +1,5 @@
 import Phaser from "phaser";
-import { MAP, WALL, roomAt, type Box, type Prop, type Room, type TaskSpot } from "@among-us/shared";
+import { MAP, TASKS, WALL, roomAt, type GameMap, type Box, type Prop, type Room, type TaskSpot } from "@among-us/shared";
 
 /**
  * Отрисовка карты «Орбитальная станция» целиком из кода — без внешних ассетов.
@@ -18,8 +18,10 @@ export interface StationMapHandle {
   destroy(): void;
 }
 
-export function createStationMap(scene: Phaser.Scene): StationMapHandle {
+export function createStationMap(scene: Phaser.Scene, map: GameMap = MAP, showRoomName = true): StationMapHandle {
   makeTextures(scene);
+  const ocean = map.id === "abyss";
+
   const objects: Phaser.GameObjects.GameObject[] = [];
   const keep = <T extends Phaser.GameObjects.GameObject>(o: T) => (objects.push(o), o);
 
@@ -27,28 +29,40 @@ export function createStationMap(scene: Phaser.Scene): StationMapHandle {
   const cam = scene.cameras.main;
   const farStars = keep(scene.add.tileSprite(0, 0, cam.width, cam.height, "st-stars-far").setOrigin(0).setScrollFactor(0).setDepth(DEPTH.space));
   const nearStars = keep(scene.add.tileSprite(0, 0, cam.width, cam.height, "st-stars-near").setOrigin(0).setScrollFactor(0).setDepth(DEPTH.space + 1));
+  if (ocean) {
+    farStars.setTint(0x68c4ca).setAlpha(0.35);
+    nearStars.setTint(0x92ffdc).setAlpha(0.65);
+    drawOceanBackdrop(scene, map, keep);
+  }
   for (const [x, y, s, tint] of [[300, 1500, 9, 0x6d28d9], [2300, 200, 8, 0x0ea5e9], [1900, 1650, 7, 0xdb2777], [500, 250, 6, 0x2563eb]] as const) {
     keep(scene.add.image(x, y, "st-glow").setScale(s).setTint(tint).setAlpha(0.22).setBlendMode(Phaser.BlendModes.ADD).setScrollFactor(0.55).setDepth(DEPTH.nebula));
   }
 
   // ── Статичная база ─────────────────────────────────────
-  const rt = keep(scene.add.renderTexture(0, 0, MAP.width, MAP.height).setOrigin(0).setDepth(DEPTH.base));
+  const rt = keep(scene.add.renderTexture(0, 0, map.width, map.height).setOrigin(0).setDepth(DEPTH.base));
   const g = scene.make.graphics({}, false);
-  drawHull(g);
-  for (const room of MAP.rooms) drawRoomFloor(g, room);
-  for (const c of MAP.corridors) drawCorridorFloor(g, c);
-  for (const w of MAP.walls) { g.fillStyle(0x000000, 0.35); g.fillRect(w.x + 4, w.y + 10, w.width, w.height); }
-  for (const p of MAP.props) drawPropShadow(g, p);
-  for (const w of MAP.walls) drawWall(g, w);
-  for (const room of MAP.rooms) drawRoomNeon(g, room);
-  drawDoors(g);
-  for (const p of MAP.props) drawProp(g, p);
-  for (const t of MAP.taskSpots) drawTaskPanel(g, t);
+  drawHull(g, map);
+  for (const room of map.rooms) drawRoomFloor(g, room);
+  for (const c of map.corridors) drawCorridorFloor(g, c);
+  for (const w of map.walls) { g.fillStyle(0x000000, 0.35); g.fillRect(w.x + 4, w.y + 10, w.width, w.height); }
+  for (const p of map.props) drawPropShadow(g, p);
+  for (const w of map.walls) drawWall(g, w);
+  for (const room of map.rooms) drawRoomNeon(g, room, map);
+  drawDoors(g, map);
+  for (const p of map.props) drawProp(g, p);
+  for (const t of map.taskSpots) drawTaskPanel(g, t);
   rt.draw(g);
   g.destroy();
 
+  for (const spot of map.taskSpots) {
+    const { icon, color } = TASKS[spot.kind];
+    keep(scene.add.text(spot.x, spot.y - 19, icon, {
+      fontFamily: "system-ui", fontSize: "17px", color: hex(color), stroke: "#06121f", strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(DEPTH.fx));
+  }
+
   // ── Свет ───────────────────────────────────────────────
-  for (const room of MAP.rooms) {
+  for (const room of map.rooms) {
     keep(scene.add.text(room.x + room.width / 2, room.y + room.height * 0.69, room.label, {
       fontFamily: "system-ui", fontSize: "20px", fontStyle: "bold", color: hex(room.accent),
       stroke: "#091424", strokeThickness: 3,
@@ -58,14 +72,14 @@ export function createStationMap(scene: Phaser.Scene): StationMapHandle {
       .setBlendMode(Phaser.BlendModes.ADD).setDepth(DEPTH.light));
     scene.tweens.add({ targets: light, alpha: 0.19, duration: 2600 + Math.random() * 1800, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
   }
-  for (const c of MAP.corridors) {
+  for (const c of map.corridors) {
     const cx = c.x + c.width / 2, cy = c.y + c.height / 2;
     keep(scene.add.image(cx, cy, "st-glow").setScale(1.4).setTint(0x93c5fd).setAlpha(0.08).setBlendMode(Phaser.BlendModes.ADD).setDepth(DEPTH.light));
   }
 
-  for (const p of MAP.props) addLiveProp(scene, p, keep);
-  addElectricalSparks(scene, keep);
-  addDust(scene, keep);
+  for (const p of map.props) addLiveProp(scene, p, keep, map);
+  addElectricalSparks(scene, keep, map);
+  addDust(scene, keep, map);
 
   // ── Подпись «ты в комнате» ─────────────────────────────
   const banner = keep(scene.add.text(cam.width / 2, 64, "", {
@@ -82,7 +96,8 @@ export function createStationMap(scene: Phaser.Scene): StationMapHandle {
     farStars.tilePositionY = cam.scrollY * 0.08;
     nearStars.tilePositionX = cam.scrollX * 0.22;
     nearStars.tilePositionY = cam.scrollY * 0.22;
-    const room = roomAt(cam.midPoint);
+    if (!showRoomName) return;
+    const room = roomAt(cam.midPoint, map);
     if (room?.id !== currentRoom) {
       currentRoom = room?.id;
       if (room) {
@@ -129,6 +144,35 @@ export function createStationMap(scene: Phaser.Scene): StationMapHandle {
 }
 
 // ───────────────────────── текстуры ─────────────────────────
+
+function drawOceanBackdrop(scene: Phaser.Scene, map: GameMap, keep: Keep) {
+  const rng = mulberry32(71);
+  const g = keep(scene.add.graphics().setDepth(DEPTH.nebula - 1));
+  for (let i = 0; i < 42; i++) {
+    const x = rng() * map.width;
+    const y = rng() * map.height;
+    const depth = 20 + rng() * 52;
+    g.fillStyle(0x0b3d4a, 0.38).fillEllipse(x, y, depth * 4, depth);
+    for (let frond = 0; frond < 5; frond++) {
+      g.lineStyle(2, frond % 2 ? 0x1c685d : 0x144c50, 0.6);
+      g.beginPath().moveTo(x, y);
+      for (let step = 1; step <= 8; step++) {
+        g.lineTo(x + (frond - 2) * step * 2 + Math.sin(step * 0.7 + frond) * 9, y - step * depth / 7);
+      }
+      g.strokePath();
+    }
+  }
+  for (const [x, y, scale] of [[1110, 715, 8], [2340, 930, 10], [2110, 1810, 7]] as const) {
+    keep(scene.add.image(x, y, "st-glow").setTint(0x069d98).setScale(scale)
+      .setAlpha(0.23).setDepth(DEPTH.nebula).setBlendMode(Phaser.BlendModes.ADD));
+  }
+  for (let i = 0; i < 18; i++) {
+    const bubble = keep(scene.add.circle(rng() * map.width, rng() * map.height, 2 + rng() * 5)
+      .setStrokeStyle(1, 0xa9e8e2, 0.42).setDepth(DEPTH.nebula));
+    scene.tweens.add({ targets: bubble, y: bubble.y - (40 + rng() * 90), alpha: 0,
+      duration: 2200 + rng() * 3800, repeat: -1, delay: rng() * 1800 });
+  }
+}
 
 function makeTextures(scene: Phaser.Scene) {
   const tex = scene.textures;
@@ -183,15 +227,15 @@ function makeTextures(scene: Phaser.Scene) {
 
 // ───────────────────────── статичные слои ─────────────────────────
 
-function drawHull(g: Phaser.GameObjects.Graphics) {
-  const areas: Box[] = [...MAP.rooms, ...MAP.corridors];
+function drawHull(g: Phaser.GameObjects.Graphics, map: GameMap) {
+  const areas: Box[] = [...map.rooms, ...map.corridors];
   g.fillStyle(0x2a3550, 1);
   for (const a of areas) g.fillRoundedRect(a.x - 14, a.y - 14, a.width + 28, a.height + 28, 18);
   g.fillStyle(0x0c1220, 1);
   for (const a of areas) g.fillRoundedRect(a.x - 10, a.y - 10, a.width + 20, a.height + 20, 14);
   // Иллюминаторы по внешнему корпусу
   g.fillStyle(0x7dd3fc, 0.55);
-  for (const r of MAP.rooms) {
+  for (const r of map.rooms) {
     for (let x = r.x + 40; x < r.x + r.width - 30; x += 70) {
       g.fillCircle(x, r.y - 6, 2.5);
       g.fillCircle(x, r.y + r.height + 6, 2.5);
@@ -258,9 +302,9 @@ function drawWall(g: Phaser.GameObjects.Graphics, w: Box) {
 }
 
 /** Неоновая полоса по внутреннему краю стен комнаты, с разрывами у дверей. */
-function drawRoomNeon(g: Phaser.GameObjects.Graphics, r: Room) {
+function drawRoomNeon(g: Phaser.GameObjects.Graphics, r: Room, map: GameMap) {
   const ix = r.x + WALL, iy = r.y + WALL, ix2 = r.x + r.width - WALL, iy2 = r.y + r.height - WALL;
-  const holes = (side: string) => MAP.doors.filter((d) => d.roomId === r.id && d.side === side).map((d) => [d.from, d.to] as const);
+  const holes = (side: string) => map.doors.filter((d) => d.roomId === r.id && d.side === side).map((d) => [d.from, d.to] as const);
   const segs = (a: number, b: number, hs: ReadonlyArray<readonly [number, number]>) => {
     const out: Array<[number, number]> = [];
     let cur = a;
@@ -277,9 +321,9 @@ function drawRoomNeon(g: Phaser.GameObjects.Graphics, r: Room) {
   }
 }
 
-function drawDoors(g: Phaser.GameObjects.Graphics) {
-  for (const d of MAP.doors) {
-    const r = MAP.rooms.find((room) => room.id === d.roomId)!;
+function drawDoors(g: Phaser.GameObjects.Graphics, map: GameMap) {
+  for (const d of map.doors) {
+    const r = map.rooms.find((room) => room.id === d.roomId)!;
     const horizontal = d.side === "top" || d.side === "bottom";
     const edge = d.side === "top" ? r.y : d.side === "bottom" ? r.y + r.height - WALL : d.side === "left" ? r.x : r.x + r.width - WALL;
     // Порог с жёлто-чёрной разметкой
@@ -388,29 +432,18 @@ function drawProp(g: Phaser.GameObjects.Graphics, p: Prop) {
   }
 }
 
-function drawTaskPanel(g: Phaser.GameObjects.Graphics, t: TaskSpot) {
-  // Небольшой настенный щиток рядом с точкой задания
-  const color = t.kind === "wires" ? 0xfacc15 : 0xf97316;
-  g.fillStyle(0x0f172a, 1); g.fillRoundedRect(t.x - 16, t.y - 16, 32, 32, 6);
-  g.lineStyle(2, color, 0.9); g.strokeRoundedRect(t.x - 16, t.y - 16, 32, 32, 6);
-  g.fillStyle(color, 1);
-  if (t.kind === "wires") {
-    g.fillTriangle(t.x + 2, t.y - 10, t.x - 7, t.y + 2, t.x, t.y + 2);
-    g.fillTriangle(t.x - 2, t.y + 10, t.x + 7, t.y - 2, t.x, t.y - 2);
-  } else {
-    g.fillRoundedRect(t.x - 6, t.y - 8, 12, 16, 3);
-    g.fillStyle(0x0f172a, 1); g.fillRect(t.x - 3, t.y - 4, 6, 4);
-  }
+function drawTaskPanel(g: Phaser.GameObjects.Graphics, spot: TaskSpot) {
+  const color = TASKS[spot.kind].color;
+  g.fillStyle(0x081421, 1).fillRoundedRect(spot.x - 14, spot.y - 13, 28, 26, 5);
+  g.lineStyle(2, color, 1).strokeRoundedRect(spot.x - 14, spot.y - 13, 28, 26, 5);
+  g.fillStyle(color, 0.9).fillCircle(spot.x, spot.y, 4);
 }
-
-// ───────────────────────── живые элементы ─────────────────────────
-
 type Keep = <T extends Phaser.GameObjects.GameObject>(o: T) => T;
 
-function addLiveProp(scene: Phaser.Scene, p: Prop, keep: Keep) {
+function addLiveProp(scene: Phaser.Scene, p: Prop, keep: Keep, map: GameMap) {
   const { x, y, width: w, height: h } = p;
   const cx = x + w / 2, cy = y + h / 2;
-  const room = roomAt({ x: cx, y: cy });
+  const room = roomAt({ x: cx, y: cy }, map);
   const accent = room?.accent ?? 0x38bdf8;
   switch (p.kind) {
     case "console": {
@@ -469,8 +502,8 @@ function addLiveProp(scene: Phaser.Scene, p: Prop, keep: Keep) {
   }
 }
 
-function addElectricalSparks(scene: Phaser.Scene, keep: Keep) {
-  const elec = MAP.rooms.find((r) => r.id === "electrical");
+function addElectricalSparks(scene: Phaser.Scene, keep: Keep, map: GameMap) {
+  const elec = map.rooms.find((r) => r.id === "electrical");
   if (!elec) return;
   const spark = keep(scene.add.image(elec.x + elec.width / 2, elec.y + 40, "st-glow").setTint(0xfff25a).setScale(2).setAlpha(0).setBlendMode(Phaser.BlendModes.ADD).setDepth(DEPTH.light));
   scene.time.addEvent({
@@ -479,8 +512,8 @@ function addElectricalSparks(scene: Phaser.Scene, keep: Keep) {
   });
 }
 
-function addDust(scene: Phaser.Scene, keep: Keep) {
-  for (const r of MAP.rooms) {
+function addDust(scene: Phaser.Scene, keep: Keep, map: GameMap) {
+  for (const r of map.rooms) {
     keep(scene.add.particles(0, 0, "st-dust", {
       x: { min: r.x + WALL, max: r.x + r.width - WALL },
       y: { min: r.y + WALL, max: r.y + r.height - WALL },

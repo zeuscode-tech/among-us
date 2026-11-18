@@ -1,153 +1,153 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
-import type { TaskChallenge, TaskProof, WireColor } from "@among-us/shared";
+import { useEffect, useState, type CSSProperties } from "react";
+import { TASKS, type TaskChallenge, type TaskProof } from "@among-us/shared";
 
 interface Props {
   challenge: TaskChallenge;
   busy: boolean;
+  error: string;
   onSolve: (proof: TaskProof) => Promise<boolean>;
   onClose: () => void;
 }
 
-const COLORS: Record<WireColor, { hex: string; name: string }> = {
-  red: { hex: "#ff7979", name: "Красный" }, blue: { hex: "#61aaff", name: "Синий" },
-  yellow: { hex: "#ffe273", name: "Жёлтый" }, purple: { hex: "#d29bff", name: "Фиолетовый" },
-};
+const GLYPHS = ["●", "▲", "■", "✦"];
+const HEADINGS = ["↑", "→", "↓", "←"];
+const GLYPH_NAMES = ["Круг", "Треугольник", "Квадрат", "Звезда"];
 
-export function TaskPanel({ challenge, busy, onSolve, onClose }: Props) {
-  const title = challenge.kind === "wires" ? "Проводка · Wires" : "Заправка · Fuel";
-  return (
-    <section className="overlay">
-      <div className="match-card" role="dialog" aria-modal="true" aria-label={title}>
-        <h2>{title}</h2>
-        {challenge.kind === "wires"
-          ? <Wires challenge={challenge} busy={busy} onSolve={onSolve} />
-          : <Fuel challenge={challenge} busy={busy} onSolve={onSolve} />}
-        <button className="quiet" onClick={onClose}>Закрыть <kbd>Esc</kbd></button>
-      </div>
-    </section>
-  );
-}
+export function TaskPanel({ challenge, busy, error, onSolve, onClose }: Props) {
+  const config = TASKS[challenge.kind];
+  const initial = challenge.kind === "trace" ? [challenge.start]
+    : challenge.kind === "orbit" ? challenge.initial
+    : challenge.kind === "balance" ? challenge.limits.map(() => 0) : [];
+  const [answer, setAnswer] = useState<number[]>(initial);
+  const [revealed, setRevealed] = useState(challenge.kind === "echo");
+  useEffect(() => {
+    if (challenge.kind !== "echo") return;
+    const timer = window.setTimeout(() => setRevealed(false), challenge.showMs);
+    return () => window.clearTimeout(timer);
+  }, [challenge]);
 
-function Wires({ challenge, busy, onSolve }: Pick<Props, "busy" | "onSolve"> & {
-  challenge: Extract<TaskChallenge, { kind: "wires" }>;
-}) {
-  const [selected, setSelected] = useState<number | null>(null);
-  const [connections, setConnections] = useState<number[]>(challenge.left.map(() => -1));
-  const [hint, setHint] = useState("");
-  const match = (destination: number) => {
-    if (selected === null) return;
-    if (challenge.left[selected] !== challenge.right[destination]) {
-      setHint("Выберите контакт того же цвета.");
-      return;
-    }
-    setConnections((previous) => previous.map((value, index) => index === selected ? destination : value));
-    setSelected(null);
-    setHint("");
-  };
-  return (
-    <>
-      <p>Выберите контакт слева, затем соедините его с контактом того же цвета справа.</p>
-      <div className="wires">
-        <div className="wire-column">
-          {challenge.left.map((color, index) => (
-            <button key={color} style={wireStyle(color)} aria-label={`Слева: ${COLORS[color].name}`}
-              aria-pressed={selected === index} disabled={connections[index] !== -1}
-              onClick={() => { setSelected(index); setHint(""); }}>
-              {COLORS[color].name}
-            </button>
-          ))}
+  const append = (value: number) => setAnswer((previous) => [...previous, value]);
+  const change = (index: number, value: number) => setAnswer((previous) =>
+    previous.map((entry, i) => i === index ? value : entry));
+  const toggle = (index: number) => setAnswer((previous) => previous.includes(index)
+    ? previous.filter((value) => value !== index) : [...previous, index].sort((a, b) => a - b));
+
+  let complete = false;
+  let content;
+  switch (challenge.kind) {
+    case "spectrum":
+      complete = answer.length === challenge.readings.length;
+      content = <>
+        <p>Упорядочьте сигналы по близости к опорной частоте <strong>{challenge.reference} Гц</strong>. Начните с ближайшего.</p>
+        <div className="puzzle-choices">
+          {challenge.readings.map((reading, index) => <button key={reading} disabled={answer.includes(index)} onClick={() => append(index)}>
+            {reading} Гц
+          </button>)}
         </div>
-        <div className="wire-gap" aria-hidden="true">
-          {connections.map((destination, source) => {
-            if (destination < 0) return null;
-            const offset = (destination - source) * 44;
-            return <i key={source} style={{
-              ...wireStyle(challenge.left[source]!), top: source * 44 + 19,
-              width: Math.hypot(64, offset), transform: `rotate(${Math.atan2(offset, 64)}rad)`,
-            }} />;
+        <p className="puzzle-sequence">{answer.map((index) => challenge.readings[index]).join(" → ") || "Выберите первый сигнал"}</p>
+      </>;
+      break;
+    case "echo":
+      complete = !revealed && answer.length === challenge.pattern.length;
+      content = <>
+        <p>{revealed ? "Запомните четыре символа, пока они видны." : "Передайте сигнал в обратном порядке."}</p>
+        <p className="puzzle-sequence" aria-label="Последовательность эха">
+          {(revealed ? challenge.pattern : answer).map((value) => GLYPHS[value]).join("  ") || "· · · ·"}
+        </p>
+        <div className="puzzle-choices">
+          {GLYPHS.map((glyph, index) => <button key={glyph} aria-label={GLYPH_NAMES[index]}
+            disabled={revealed || complete} onClick={() => append(index)}>{glyph}</button>)}
+        </div>
+      </>;
+      break;
+    case "balance": {
+      const sum = answer.reduce((total, current) => total + current, 0);
+      complete = sum === challenge.target;
+      content = <>
+        <p>Настройте три регулятора. Вместе они должны дать <strong>{challenge.target} ед.</strong></p>
+        <div className="puzzle-controls">
+          {challenge.limits.map((limit, index) => <label key={index}>
+            Регулятор {index + 1} · {answer[index]} / {limit}
+            <input aria-label={`Регулятор ${index + 1}`} type="range" min={0} max={limit}
+              value={answer[index]} onChange={(event) => change(index, Number(event.target.value))} />
+          </label>)}
+        </div>
+        <output className="puzzle-sequence">{sum} / {challenge.target} ед.</output>
+      </>;
+      break;
+    }
+    case "orbit":
+      complete = answer.every((value, index) => value === challenge.target[index]);
+      content = <>
+        <p>Поверните каждое кольцо так, чтобы стрелка совпала с отметкой справа.</p>
+        <div className="orbit-controls">
+          {challenge.target.map((target, index) => <div key={index}>
+            <button className="orbit-wheel" aria-label={`Повернуть кольцо ${index + 1}`}
+              onClick={() => change(index, (answer[index]! + 1) % 4)}>{HEADINGS[answer[index]!]}</button>
+            <span className="orbit-target" aria-label={`Цель кольца ${index + 1}`}>{HEADINGS[target]}</span>
+          </div>)}
+        </div>
+      </>;
+      break;
+    case "trace": {
+      const { size, blocked, start, finish } = challenge;
+      const head = answer.at(-1)!;
+      complete = head === finish;
+      content = <>
+        <p>Проведите дрон от старта до шлюза. Выбирайте соседние клетки и обходите завалы.</p>
+        <div className="trace-grid" style={{ "--grid-size": size } as CSSProperties}>
+          {Array.from({ length: size * size }, (_, cell) => {
+            const adjacent = Math.abs(cell % size - head % size) + Math.abs(Math.floor(cell / size) - Math.floor(head / size)) === 1;
+            return <button key={cell} aria-label={`Клетка ${cell + 1}`}
+              title={cell === start ? "Старт" : cell === finish ? "Шлюз" : undefined}
+              aria-pressed={answer.includes(cell)} disabled={complete || !adjacent || blocked.includes(cell) || answer.includes(cell)}
+              onClick={() => append(cell)}>
+              {cell === head ? "◆" : cell === finish ? "◎" : blocked.includes(cell) ? "▨" : answer.includes(cell) ? "•" : "·"}
+            </button>;
           })}
         </div>
-        <div className="wire-column">
-          {challenge.right.map((color, index) => (
-            <button key={color} style={wireStyle(color)} aria-label={`Справа: ${COLORS[color].name}`}
-              disabled={selected === null || connections.includes(index)} onClick={() => match(index)}>
-              {COLORS[color].name}
-            </button>
-          ))}
+      </>;
+      break;
+    }
+    case "decode":
+      complete = answer.length === challenge.signal.length;
+      content = <>
+        <p>Прочитайте код по легенде и введите соответствующие цифры.</p>
+        <div className="puzzle-choices">
+          {challenge.alphabet.map((value, index) => <span key={index} className="puzzle-chip">{GLYPHS[index]} = {value}</span>)}
         </div>
-      </div>
-      {hint && <p role="status">{hint}</p>}
-      <button className="primary" disabled={busy || connections.includes(-1)}
-        onClick={() => void onSolve({ kind: "wires", token: challenge.token, connections })}>
-        Завершить задание
-      </button>
-    </>
-  );
-}
-
-function wireStyle(color: WireColor): CSSProperties {
-  return { "--wire": COLORS[color].hex } as CSSProperties;
-}
-
-function Fuel({ challenge, busy, onSolve }: Pick<Props, "busy" | "onSolve"> & {
-  challenge: Extract<TaskChallenge, { kind: "fuel" }>;
-}) {
-  const [charge, setCharge] = useState(0);
-  const frame = useRef<number | null>(null);
-  const submitting = useRef(false);
-  useEffect(() => () => {
-    if (frame.current !== null) cancelAnimationFrame(frame.current);
-  }, []);
-
-  function stop() {
-    if (frame.current !== null) cancelAnimationFrame(frame.current);
-    frame.current = null;
-    if (!submitting.current) setCharge(0);
-  }
-
-  function hold() {
-    if (frame.current !== null || submitting.current || busy) return;
-    const start = performance.now();
-    const step = (now: number) => {
-      const fraction = Math.min(1, (now - start) / challenge.holdMs);
-      setCharge(fraction);
-      if (fraction < 1) {
-        frame.current = requestAnimationFrame(step);
-        return;
-      }
-      frame.current = null;
-      submitting.current = true;
-      void onSolve({ kind: "fuel", token: challenge.token }).then((ok) => {
-        submitting.current = false;
-        if (!ok) setCharge(0);
-      });
-    };
-    frame.current = requestAnimationFrame(step);
+        <p className="puzzle-sequence">{challenge.signal.map((value) => GLYPHS[value]).join(" ")}</p>
+        <div className="puzzle-choices">
+          {GLYPHS.map((_, index) => <button key={index} disabled={complete} onClick={() => append(index)}>{index}</button>)}
+        </div>
+        <p className="puzzle-sequence">{answer.join(" ") || "· · · ·"}</p>
+      </>;
+      break;
+    case "sample":
+      complete = answer.length > 0;
+      content = <>
+        <p>Отберите все стабильные пробы не горячее <strong>{challenge.limit} °C</strong>.</p>
+        <div className="sample-grid">
+          {challenge.samples.map((sample, index) => <button key={index} aria-pressed={answer.includes(index)} onClick={() => toggle(index)}>
+            Проба {index + 1} · {sample.temperature} °C · {sample.stable ? "стабильна" : "нестабильна"}
+          </button>)}
+        </div>
+      </>;
   }
 
   return (
-    <>
-      <p>Удерживайте кнопку, пока бак не заполнится.</p>
-      <progress aria-label="Заполнение бака" value={charge} max={1} />
-      <button className="primary" disabled={busy} onBlur={stop}
-        onPointerDown={(event) => {
-          if (event.button !== 0) return;
-          event.currentTarget.setPointerCapture(event.pointerId);
-          hold();
-        }}
-        onPointerUp={stop} onLostPointerCapture={stop} onPointerCancel={stop}
-        onKeyDown={(event) => {
-          if (event.key !== " " && event.key !== "Enter") return;
-          event.preventDefault();
-          hold();
-        }}
-        onKeyUp={(event) => {
-          if (event.key !== " " && event.key !== "Enter") return;
-          event.preventDefault();
-          stop();
-        }}>
-        Удерживайте для заправки
-      </button>
-    </>
+    <section className="overlay">
+      <div className="match-card" role="dialog" aria-modal="true" aria-label={config.name}>
+        <h2>{config.name}</h2>
+        {content}
+        {error && <p className="error" role="alert">{error}</p>}
+        <div className="actions puzzle-actions">
+          <button className="primary" disabled={!complete || busy}
+            onClick={() => void onSolve({ token: challenge.token, answer })}>Завершить задание</button>
+          {challenge.kind !== "sample" && <button disabled={busy} onClick={() => setAnswer(initial)}>Сбросить ввод</button>}
+          <button className="quiet" onClick={onClose}>Закрыть <kbd>Esc</kbd></button>
+        </div>
+      </div>
+    </section>
   );
 }

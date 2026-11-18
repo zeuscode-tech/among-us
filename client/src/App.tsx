@@ -1,9 +1,10 @@
 import { useEffect, useEffectEvent, useState, type FormEvent } from "react";
 import {
-  EVENTS, KILL_RADIUS, MAP, REPORT_RADIUS, TASK_RADIUS, withinReach,
-  type GameResult, type PlayerState, type Role, type TaskChallenge, type TaskProof, type VoteResult,
+  EVENTS, GAME_MAPS, KILL_RADIUS, MAP_INFO, REPORT_RADIUS, TASK_RADIUS, TASKS, withinReach,
+  type GameResult, type MapId, type PlayerState, type Role, type TaskChallenge, type TaskProof, type VoteResult,
 } from "@among-us/shared";
 import { GameCanvas } from "./game/GameCanvas";
+import { MapPlan } from "./game/MapPlan";
 import { TaskPanel } from "./game/TaskPanel";
 import { commands, useGameSession } from "./network/useGameSession";
 
@@ -52,7 +53,7 @@ export function App() {
           <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Например, Red" maxLength={20} autoFocus />
         </label>
         <form onSubmit={createRoom}>
-          <button className="primary" disabled={!game.connected || game.busy}>Создать комнату</button>
+          <button className="primary" disabled={!game.connected || game.restoring || game.busy}>Создать комнату</button>
         </form>
         <div className="divider"><span>или</span></div>
         <form className="join-form" onSubmit={joinRoom}>
@@ -60,8 +61,11 @@ export function App() {
             Код комнаты
             <input value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} placeholder="ABC123" maxLength={6} />
           </label>
-          <button disabled={!game.connected || game.busy}>Войти</button>
+          <button disabled={!game.connected || game.restoring || game.busy}>Войти</button>
         </form>
+        {game.restoring && <p role="status">Восстанавливаем сессию…</p>}
+        {game.connected && game.savedSession && !game.restoring &&
+          <button className="quiet" onClick={() => void game.restoreSession()}>Восстановить сессию</button>}
         <ErrorText text={game.error} />
       </section>
     </main>
@@ -71,9 +75,17 @@ export function App() {
 function Lobby({ session }: { session: InRoom }) {
   const { room, playerId, run, busy, setError } = session;
   const [copied, setCopied] = useState(false);
+  const [plan, setPlan] = useState(false);
+  const map = GAME_MAPS[room.mapId];
   const me = room.players.find((player) => player.id === playerId);
   const enough = room.players.length >= room.minPlayers;
-  const everyoneReady = room.players.every((player) => player.isHost || player.ready);
+  const everyoneReady = room.players.every((player) => player.connected && (player.isHost || player.ready));
+  useEffect(() => {
+    if (!plan) return;
+    const closePlan = (event: KeyboardEvent) => { if (event.key === "Escape") setPlan(false); };
+    window.addEventListener("keydown", closePlan);
+    return () => window.removeEventListener("keydown", closePlan);
+  }, [plan]);
   async function copyCode() {
     try {
       await navigator.clipboard.writeText(room.code);
@@ -83,21 +95,32 @@ function Lobby({ session }: { session: InRoom }) {
     }
   }
   return (
-    <main className="centered">
-      <section className="lobby-card wide">
+    <main className="game-layout lobby-layout">
+      <section className="room-panel">
         <Connection online={session.connected} />
         <h1>Лобби</h1>
         <div className="room-code">
           <strong>{room.code}</strong>
           <button className="quiet" onClick={() => void copyCode()}>{copied ? "Код скопирован" : "Копировать код"}</button>
         </div>
-        <p>Откройте игру в других вкладках или передайте код друзьям.</p>
+        <label className="map-picker">
+          Карта
+          <select aria-label="Карта" value={room.mapId} disabled={!me?.isHost || busy}
+            onChange={(event) => {
+              const mapId = event.target.value as MapId;
+              void run(() => commands().emitWithAck(EVENTS.ROOM_MAP, { mapId }));
+            }}>
+            {Object.entries(MAP_INFO).map(([id, info]) => <option key={id} value={id}>{info.name}</option>)}
+          </select>
+        </label>
+        <p className="muted map-description">{MAP_INFO[room.mapId].description}</p>
         <h2>Игроки {room.players.length}/{room.maxPlayers}</h2>
+        <p className="muted">{room.players.filter((player) => player.connected && player.ready).length} отметили готовность</p>
         <ul className="players">
           {room.players.map((player) => (
             <li key={player.id}>
               <PlayerName player={player} me={playerId} />
-              <span className={player.ready ? "ready" : "muted"}>{player.ready ? "Готов" : "Ожидает"}</span>
+              <span className={player.ready ? "ready" : "muted"}>{!player.connected ? "Переподключается" : player.ready ? "Готов" : "Ожидает"}</span>
             </li>
           ))}
         </ul>
@@ -114,6 +137,16 @@ function Lobby({ session }: { session: InRoom }) {
           : !everyoneReady ? "Ожидаем готовности остальных игроков." : "Хост может начать матч."}</p>
         <ErrorText text={session.error} />
       </section>
+      <section className="game-stage">
+        <div className="stage-toolbar">
+          <span>Свободная прогулка · <kbd>WASD</kbd> / <kbd>← ↑ ↓ →</kbd></span>
+          <button className="quiet" onClick={() => setPlan(true)}>Схема карты</button>
+        </div>
+        {session.snapshot?.mapId === room.mapId && <GameCanvas snapshots={session.snapshots} playerId={playerId}
+          mapId={room.mapId} taskSpots={[]} blocked={plan} />}
+        {plan && <MapPlan map={map} pending={[]} position={session.snapshot?.players.find((player) => player.id === playerId)}
+          close={() => setPlan(false)} />}
+      </section>
     </main>
   );
 }
@@ -122,6 +155,8 @@ function Match({ session }: { session: InRoom }) {
   const { room, snapshots, snapshot, playerId, privateState, busy, run } = session;
   const [task, setTask] = useState<{ id: string; challenge: TaskChallenge } | null>(null);
   const [killTarget, setKillTarget] = useState("");
+  const [plan, setPlan] = useState(false);
+  const map = GAME_MAPS[room.mapId];
   const privateRound = privateState?.round === room.round ? privateState : null;
   const role = privateRound?.role;
   const me = room.players.find((player) => player.id === playerId);
@@ -130,29 +165,29 @@ function Match({ session }: { session: InRoom }) {
   const tasks = privateRound?.tasks ?? [];
   const pendingSpots = tasks.filter((entry) => !entry.completed).map((entry) => entry.spotId);
   const nearbyTask = position && tasks.find((entry) => {
-    const spot = MAP.taskSpots.find(({ id }) => entry.spotId === id);
-    return !entry.completed && spot && withinReach(position, spot, TASK_RADIUS);
+    const spot = map.taskSpots.find(({ id }) => entry.spotId === id);
+    return !entry.completed && spot && withinReach(position, spot, TASK_RADIUS, map);
   });
   const arrivedAt = useServerClock(room.serverTime);
   const canKill = role === "impostor" && playing;
   const cooldown = Math.max(0, Math.ceil(((privateRound?.killAvailableAt ?? 0) - arrivedAt) / 1000));
   const targets = canKill && position ? (snapshot?.players ?? []).filter((player) =>
-    player.id !== playerId && player.alive && withinReach(position, player, KILL_RADIUS)) : [];
+    player.id !== playerId && player.alive && withinReach(position, player, KILL_RADIUS, map)) : [];
   const target = targets.find((candidate) => candidate.id === killTarget) ?? targets[0];
-  const body = playing && position && snapshot?.bodies.find((candidate) => withinReach(position, candidate, REPORT_RADIUS));
+  const body = playing && position && snapshot?.bodies.find((candidate) => withinReach(position, candidate, REPORT_RADIUS, map));
   const inMeeting = room.phase === "meeting" || room.phase === "voting";
 
-  useEffect(() => { setTask(null); }, [room.phase, me?.alive]);
+  useEffect(() => { setTask(null); setPlan(false); }, [room.phase, me?.alive]);
 
   const useTask = () => {
-    if (!playing || !nearbyTask || task) return;
+    if (!playing || !nearbyTask || task || plan) return;
     void run<TaskChallenge>(() => commands().emitWithAck(EVENTS.TASK_INTERACT, { taskId: nearbyTask.id }),
       (challenge) => setTask({ id: nearbyTask.id, challenge }));
   };
   const handleKey = useEffectEvent((event: KeyboardEvent) => {
     if (event.repeat) return;
     if (event.code === "KeyE") useTask();
-    if (event.key === "Escape" && task) setTask(null);
+    if (event.key === "Escape") { setTask(null); setPlan(false); }
   });
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => handleKey(event);
@@ -177,15 +212,16 @@ function Match({ session }: { session: InRoom }) {
           <h2>Ваши задания</h2>
           <ul className="tasks">
             {tasks.map((entry) => {
-              const spot = MAP.taskSpots.find(({ id }) => entry.spotId === id)!;
-              const roomName = MAP.rooms.find(({ id }) => spot.roomId === id)!.label.toLowerCase();
+              const spot = map.taskSpots.find(({ id }) => entry.spotId === id)!;
+              const roomName = map.rooms.find(({ id }) => spot.roomId === id)!.label.toLowerCase();
               return <li key={entry.id} className={entry.completed ? "ready" : ""}>
-                <span aria-hidden="true">{entry.completed ? "✓" : "○"}</span> {spot.kind === "wires" ? "Проводка" : "Заправка"} · {roomName}
+                <span aria-hidden="true">{entry.completed ? "✓" : "○"}</span> {TASKS[spot.kind].name} · {roomName}
               </li>;
             })}
           </ul>
         </>}
         <p className="controls"><kbd>WASD</kbd> / <kbd>← ↑ ↓ →</kbd> Движение</p>
+        <button className="quiet" disabled={room.phase !== "playing" || !!task} onClick={() => setPlan(true)}>Схема карты</button>
         <div className="actions">
           {role === "crew" && <button disabled={!nearbyTask || !playing || busy || !!task} onClick={useTask}>Use <kbd>E</kbd></button>}
           <button disabled={!body || busy || !!task}
@@ -194,7 +230,7 @@ function Match({ session }: { session: InRoom }) {
         {canKill && <div className="kill-panel">
           {targets.length > 0 && <label>
             Цель
-            <select value={target?.id ?? ""} onChange={(event) => setKillTarget(event.target.value)}>
+            <select aria-label="Цель" value={target?.id ?? ""} onChange={(event) => setKillTarget(event.target.value)}>
               {targets.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
             </select>
           </label>}
@@ -208,8 +244,8 @@ function Match({ session }: { session: InRoom }) {
         <LeaveButton session={session} />
       </aside>
       <section className="game-stage">
-        {snapshot && room.phase !== "starting" && <GameCanvas snapshots={snapshots} playerId={playerId} taskSpots={me?.alive ? pendingSpots : []}
-          blocked={!!task || !playing} />}
+        {snapshot && room.phase !== "starting" && <GameCanvas snapshots={snapshots} playerId={playerId} mapId={room.mapId} taskSpots={me?.alive ? pendingSpots : []}
+          blocked={!!task || !playing || plan} />}
         {room.phase === "starting" && role && (
           <div className="overlay">
             <section className={`match-card role-card ${role}`}>
@@ -219,8 +255,9 @@ function Match({ session }: { session: InRoom }) {
             </section>
           </div>
         )}
+        {plan && room.phase === "playing" && <MapPlan map={map} pending={pendingSpots} position={position} close={() => setPlan(false)} />}
         {inMeeting && <Meeting session={session} now={arrivedAt} />}
-        {playing && task && <TaskPanel key={task.challenge.token} challenge={task.challenge} busy={busy}
+        {playing && task && <TaskPanel key={task.challenge.token} challenge={task.challenge} busy={busy} error={session.error}
           onSolve={solve} onClose={() => setTask(null)} />}
       </section>
     </main>

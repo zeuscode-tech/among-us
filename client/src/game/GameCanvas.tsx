@@ -1,8 +1,8 @@
 import { useEffect, useRef, type RefObject } from "react";
 import Phaser from "phaser";
 import {
-  EVENTS, INPUT_INTERVAL_MS, MAP, collides, movePosition, type BodyState, type GameSnapshot,
-  type MoveInput, type MovementDirection, type PositionedPlayer, type Vec,
+  EVENTS, INPUT_INTERVAL_MS, GAME_MAPS, collides, movePosition, type BodyState, type GameSnapshot,
+  type GameMap, type MapId, type MoveInput, type MovementDirection, type PositionedPlayer, type Vec,
 } from "@among-us/shared";
 import { socket } from "../network/socket";
 import { createStationMap, type StationMapHandle } from "./map/StationRenderer";
@@ -10,6 +10,7 @@ import { createStationMap, type StationMapHandle } from "./map/StationRenderer";
 interface CanvasProps {
   snapshots: RefObject<GameSnapshot | null>;
   playerId: string;
+  mapId: MapId;
   blocked: boolean;
   taskSpots: readonly string[];
 }
@@ -22,7 +23,7 @@ interface Avatar {
 }
 
 export function GameCanvas(props: CanvasProps) {
-  const { playerId } = props;
+  const { playerId, mapId } = props;
   const containerRef = useRef<HTMLDivElement>(null);
   const latest = useRef(props);
   useEffect(() => { latest.current = props; }, [props]);
@@ -43,7 +44,7 @@ export function GameCanvas(props: CanvasProps) {
         width: 960,
         height: 600,
         backgroundColor: "#07111f",
-        scene: new MultiplayerScene(latest),
+        scene: new MultiplayerScene(latest, GAME_MAPS[mapId]),
         scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
       });
     });
@@ -53,7 +54,7 @@ export function GameCanvas(props: CanvasProps) {
       game?.destroy(true);
       parent.remove();
     };
-  }, [playerId]);
+  }, [playerId, mapId]);
 
   return <div className="game-canvas" ref={containerRef} aria-label="Игровая карта" />;
 }
@@ -74,16 +75,17 @@ class MultiplayerScene extends Phaser.Scene {
   private lastDirection = IDLE;
   private enabled = false;
 
-  constructor(private readonly latest: RefObject<CanvasProps>) {
+  constructor(private readonly latest: RefObject<CanvasProps>, private readonly map: GameMap) {
     super("multiplayer");
   }
 
   create() {
-    this.cameras.main.setBounds(0, 0, MAP.width, MAP.height);
-    this.stationMap = createStationMap(this);
+    this.cameras.main.setBounds(0, 0, this.map.width, this.map.height);
+    this.stationMap = createStationMap(this, this.map);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.stationMap?.destroy());
     this.cursors = this.input.keyboard?.createCursorKeys();
     this.wasd = this.input.keyboard?.addKeys({ up: "W", down: "S", left: "A", right: "D" }) as typeof this.wasd;
+    this.input.keyboard?.disableGlobalCapture();
     this.applySnapshot();
   }
 
@@ -93,13 +95,19 @@ class MultiplayerScene extends Phaser.Scene {
     const taskKey = taskSpots.join("|");
     if (taskKey !== this.activeSpots) {
       this.activeSpots = taskKey;
-      this.stationMap?.highlightTasks(MAP.taskSpots.filter((spot) => taskSpots.includes(spot.id)));
+      this.stationMap?.highlightTasks(this.map.taskSpots.filter((spot) => taskSpots.includes(spot.id)));
     }
 
     const local = this.avatars.get(playerId);
-    const canMove = this.snapshot?.phase === "playing" && this.snapshot.players.some((p) => p.id === playerId && p.alive);
-    const enabled = canMove && !blocked && socket.connected;
-    if (this.enabled && !enabled) this.input.keyboard?.resetKeys();
+    const canMove = (this.snapshot?.phase === "playing" || this.snapshot?.phase === "lobby")
+      && this.snapshot.players.some((p) => p.id === playerId && p.alive && p.connected);
+    const editing = !!document.activeElement?.matches("input, select, textarea");
+    const enabled = canMove && !blocked && !editing && socket.connected;
+    if (this.enabled !== enabled) {
+      this.input.keyboard?.resetKeys();
+      if (enabled) this.input.keyboard?.enableGlobalCapture();
+      else this.input.keyboard?.disableGlobalCapture();
+    }
     this.enabled = enabled;
     const direction = enabled ? this.readDirection() : IDLE;
     const hasInput = moving(direction);
@@ -118,7 +126,7 @@ class MultiplayerScene extends Phaser.Scene {
       const previous = { x: sprite.x, y: sprite.y };
       const isLocal = avatar === local;
       if (isLocal && hasInput) {
-        const predicted = movePosition(sprite, direction, dt / 1000);
+        const predicted = movePosition(sprite, direction, dt / 1000, this.map);
         sprite.setPosition(predicted.x, predicted.y);
       } else {
         const blend = 1 - Math.exp(-dt / 47);
@@ -144,7 +152,9 @@ class MultiplayerScene extends Phaser.Scene {
   private applySnapshot() {
     const { snapshots, playerId } = this.latest.current;
     const snapshot = snapshots.current;
-    if (!snapshot || snapshot === this.snapshot) return;
+    if (!snapshot || snapshot.mapId !== this.map.id || snapshot === this.snapshot) return;
+    const ownSequence = snapshot.players.find((player) => player.id === playerId)?.sequence ?? -1;
+    this.sequence = Math.max(this.sequence, ownSequence + 1);
     const phaseChanged = this.snapshot?.phase !== snapshot.phase;
     this.snapshot = snapshot;
 
@@ -153,7 +163,7 @@ class MultiplayerScene extends Phaser.Scene {
       const isLocal = player.id === playerId;
       const avatar = this.avatars.get(player.id) ?? this.createAvatar(player, isLocal);
       avatar.target = player;
-      avatar.sprite.setAlpha(player.alive ? 1 : 0.35);
+      avatar.sprite.setAlpha(player.alive && player.connected ? 1 : 0.35);
       const title = `${player.isHost ? "★ " : ""}${player.name}${isLocal ? " · вы" : ""}`;
       if (avatar.label.text !== title) avatar.label.setText(title);
 
@@ -161,10 +171,9 @@ class MultiplayerScene extends Phaser.Scene {
         avatar.sprite.setPosition(player.x, player.y);
         if (isLocal) this.cameras.main.centerOn(player.x, player.y);
       } else if (isLocal) {
-        this.sequence = Math.max(this.sequence, player.sequence + 1);
         const x = Phaser.Math.Linear(avatar.sprite.x, player.x, 0.25);
         const y = Phaser.Math.Linear(avatar.sprite.y, player.y, 0.25);
-        if (!collides(x, y)) avatar.sprite.setPosition(x, y);
+        if (!collides(x, y, this.map.playerRadius, this.map)) avatar.sprite.setPosition(x, y);
       }
     }
 

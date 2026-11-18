@@ -82,12 +82,6 @@ progress { width: 100%; height: 13px; display: block; accent-color: #5eead4; }
 .match-card > .quiet { margin-top: 12px; }
 .match-card progress { margin: 18px 0; }
 
-.wires { display: grid; grid-template-columns: 1fr 64px 1fr; margin-bottom: 16px; }
-.wire-column { display: grid; gap: 4px; }
-.wire-column button { height: 40px; padding: 0 5px; font-size: clamp(11px, 2vw, 15px); border-color: var(--wire); }
-.wire-column button[aria-pressed="true"] { background: var(--wire); color: #081421; }
-.wire-gap { position: relative; pointer-events: none; }
-.wire-gap i { position: absolute; left: 0; height: 3px; background: var(--wire); transform-origin: left center; }
 
 @media (max-width: 800px) {
   .landing { grid-template-columns: 1fr; gap: 20px; align-content: center; padding: 24px; }
@@ -95,4 +89,40 @@ progress { width: 100%; height: 13px; display: block; accent-color: #5eead4; }
   .room-panel { z-index: auto; padding: 14px; }
   .game-stage { min-height: 460px; }
   .match-card { max-height: 440px; }
+}
+
+.lobby-layout { grid-template-columns: minmax(300px, 340px) minmax(0, 1fr); }
+.lobby-layout .room-code { margin: 14px 0; }
+.lobby-layout .players { gap: 6px; }
+.lobby-layout .players li { justify-content: space-between; gap: 6px; }
+.lobby-layout .players li > :first-child { flex-basis: auto; }
+.lobby-layout .room-panel h2 { margin-top: 14px; }
+.map-description { font-size: 13px; }
+.stage-toolbar { position: absolute; top: 12px; left: 16px; right: 16px; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; color: #b6cbdb; }
+.game-stage > .overlay { z-index: 2; }
+.plan-card { width: min(100%, 770px); }
+.map-plan { position: relative; margin: 14px 0; width: 100%; border: 1px solid #34566d; border-radius: 8px; background: #040e1d; }
+.map-plan.abyss { background: #09232c; }
+.plan-corridor, .plan-room, .plan-marker { position: absolute; }
+.plan-corridor { background: #344c60; }
+.plan-room { display: grid; place-items: center; border: 1px solid; border-radius: 3px; text-align: center; padding: 3px; font-size: clamp(5px, 1vw, 12px); font-weight: 800; }
+.plan-marker { z-index: 1; transform: translate(-50%, -50%); color: #fff27e; text-shadow: 0 0 4px #050c12; font-size: clamp(10px, 1.9vw, 20px); }
+
+.puzzle-choices { display: flex; flex-wrap: wrap; gap: 7px; }
+.puzzle-sequence { font: 700 20px ui-monospace, monospace; color: #a8ede9; min-height: 28px; }
+.puzzle-controls, .sample-grid { display: grid; gap: 7px; }
+.puzzle-controls input { padding: 0; accent-color: #5eead4; }
+.puzzle-chip { border-radius: 6px; padding: 7px 10px; background: #20374f; }
+.puzzle-actions { margin-top: 14px; }
+.orbit-controls { display: grid; gap: 9px; }
+.orbit-controls > div { display: flex; align-items: center; gap: 18px; }
+.orbit-wheel, .orbit-target { display: grid; place-items: center; height: 44px; width: 44px; font-size: 22px; border-radius: 50%; padding: 0; }
+.orbit-target { border: 2px dashed #7bc0e2; color: #a9e5f6; }
+.trace-grid { display: grid; grid-template-columns: repeat(var(--grid-size), minmax(32px, 48px)); gap: 5px; }
+.trace-grid button { padding: 6px; aspect-ratio: 1; }
+.trace-grid button[aria-pressed="true"], .sample-grid button[aria-pressed="true"] { background: #216256; border-color: #7df3c8; opacity: 1; }
+.sample-grid button { text-align: left; }
+@media (max-width: 800px) {
+  .lobby-layout { grid-template-columns: 1fr; }
+  .stage-toolbar span { max-width: 155px; }
 }
