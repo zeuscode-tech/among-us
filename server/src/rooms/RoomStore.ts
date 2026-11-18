@@ -1,13 +1,17 @@
 import { randomInt, randomUUID } from "node:crypto";
 import {
-  KILL_RADIUS, MAP, REPORT_RADIUS, TASK_RADIUS, TICK_MS, WIRE_COLORS, movePosition, withinReach,
+  KILL_RADIUS, MAP, REPORT_RADIUS, TASK_RADIUS, TICK_MS, TASKS, GAME_MAPS, isMapId, movePosition, withinReach,
   type AssignedTask, type BodyState, type ErrorCode, type GamePhase, type GameResult, type GameSnapshot,
-  type MeetingState, type MoveInput, type PlayerState, type PrivateState, type Role, type RoomState,
-  type TaskChallenge, type TaskProgress, type TaskSpot, type VoteResult, type WinReason,
+  type GameMap, type MeetingState, type MoveInput, type PlayerState, type PrivateState, type Role, type RoomState,
+  type TaskChallenge, type TaskProgress, type TaskSpot, type TaskSpotKind, type VoteResult, type WinReason,
 } from "@among-us/shared";
+import { acceptsAnswer, createChallenge } from "./puzzles.js";
 
 interface Player extends PlayerState {
   slot: number;
+  sessionToken: string;
+  connectionId: string | null;
+  disconnectDeadline: number;
   x: number;
   y: number;
   role: Role | null;
@@ -21,6 +25,7 @@ interface Player extends PlayerState {
 
 interface Room {
   code: string;
+  map: GameMap;
   players: Map<string, Player>;
   phase: GamePhase;
   round: number;
@@ -55,6 +60,7 @@ export interface GameOptions {
   discussionMs: number;
   votingMs: number;
   killCooldownMs: number;
+  sessionGraceMs: number;
   now: () => number;
   random: () => number;
 }
@@ -65,6 +71,7 @@ export const DEFAULT_GAME_OPTIONS: GameOptions = {
   discussionMs: 45_000,
   votingMs: 30_000,
   killCooldownMs: 20_000,
+  sessionGraceMs: 60_000,
   now: Date.now,
   random: () => randomInt(2 ** 32) / 2 ** 32,
 };
@@ -74,14 +81,13 @@ const MAX_PLAYERS = MAP.spawnPoints.length;
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const INPUT_TIMEOUT_MS = 250;
 const INPUT_MIN_INTERVAL_MS = 25;
-const FUEL_HOLD_MS = 1500;
-const TASK_SPOTS = new Map(MAP.taskSpots.map((spot) => [spot.id, spot]));
-const WIRES = MAP.taskSpots.filter((spot) => spot.kind === "wires");
-const FUEL = MAP.taskSpots.filter((spot) => spot.kind === "fuel");
+const TASK_TYPES = Object.keys(TASKS) as TaskSpotKind[];
+const TASKS_PER_PLAYER = 3;
 
 export class RoomStore {
   private readonly rooms = new Map<string, Room>();
-  private readonly socketToRoom = new Map<string, Room>();
+  private readonly membership = new Map<string, Room>();
+  private readonly sessions = new Map<string, string>();
   private readonly changedRooms = new Set<Room>();
   private readonly options: GameOptions;
 
@@ -89,23 +95,23 @@ export class RoomStore {
     this.options = { ...DEFAULT_GAME_OPTIONS, ...options };
   }
 
-  create(socketId: string, rawName: unknown): RoomState {
+  create(playerId: string, rawName: unknown): RoomState {
     const name = validateName(rawName);
-    this.requireNoRoom(socketId);
+    this.requireNoRoom(playerId);
     const code = this.createUniqueCode();
     const room: Room = {
-      code, players: new Map(), phase: "lobby", round: 0, deadline: 0, simulationAt: 0,
+      code, map: MAP, players: new Map(), phase: "lobby", round: 0, deadline: 0, simulationAt: 0,
       bodies: [], votes: new Map(), progress: { completed: 0, total: 0 },
       meeting: null, voteResult: null, result: null, events: {},
     };
     this.rooms.set(code, room);
-    return this.addPlayer(room, socketId, name);
+    return this.addPlayer(room, playerId, name);
   }
 
-  join(socketId: string, rawCode: unknown, rawName: unknown): RoomState {
+  join(playerId: string, rawCode: unknown, rawName: unknown): RoomState {
     if (typeof rawCode !== "string") invalidPayload();
     const name = validateName(rawName);
-    this.requireNoRoom(socketId);
+    this.requireNoRoom(playerId);
     const room = this.rooms.get(rawCode.trim().toUpperCase());
     if (!room) throw new RoomError("ROOM_NOT_FOUND", "Комната не найдена");
     if (room.phase !== "lobby") throw new RoomError("MATCH_ALREADY_STARTED", "Матч уже начался");
@@ -113,19 +119,72 @@ export class RoomStore {
     if ([...room.players.values()].some((player) => player.name.toLowerCase() === name.toLowerCase())) {
       throw new RoomError("NAME_TAKEN", "Это имя уже занято в комнате");
     }
-    return this.addPlayer(room, socketId, name);
+    return this.addPlayer(room, playerId, name);
   }
 
-  roomCodeFor(socketId: string): string | undefined {
-    return this.socketToRoom.get(socketId)?.code;
+  roomCodeFor(playerId: string): string | undefined {
+    return this.membership.get(playerId)?.code;
   }
 
-  leave(socketId: string): void {
-    const room = this.socketToRoom.get(socketId);
+  tokenFor(playerId: string): string {
+    return this.member(playerId)[1].sessionToken;
+  }
+
+  ownsConnection(playerId: string, connectionId: string): boolean {
+    return this.membership.get(playerId)?.players.get(playerId)?.connectionId === connectionId;
+  }
+
+  resume(token: unknown, connectionId: string) {
+    if (typeof token !== "string" || token.length !== 36) invalidPayload();
+    const id = this.sessions.get(token);
+    const room = id ? this.membership.get(id) : undefined;
+    const player = id ? room?.players.get(id) : undefined;
+    const now = this.options.now();
+    if (!room || !player || (player.disconnectDeadline && now >= player.disconnectDeadline)) {
+      throw new RoomError("SESSION_EXPIRED", "Сессия истекла. Войдите в комнату снова.");
+    }
+    const previous = player.connectionId;
+    player.connectionId = connectionId;
+    player.connected = true;
+    player.disconnectDeadline = 0;
+    player.input = null;
+    this.changedRooms.add(room);
+    return {
+      playerId: player.id, sessionToken: player.sessionToken, room: this.publicRoom(room, now), previous,
+      snapshot: snapshot(room, now), privateState: privatePlayer(room, player),
+    };
+  }
+
+  disconnect(playerId: string, connectionId: string): void {
+    if (!this.ownsConnection(playerId, connectionId)) return;
+    const [room, player] = this.member(playerId);
+    player.connectionId = null;
+    player.connected = false;
+    player.disconnectDeadline = this.options.now() + this.options.sessionGraceMs;
+    player.input = null;
+    this.changedRooms.add(room);
+  }
+
+  selectMap(playerId: string, mapId: unknown): void {
+    if (!isMapId(mapId)) invalidPayload();
+    const [room, player] = this.member(playerId);
+    requirePhase(room, "lobby");
+    if (!player.isHost) throw new RoomError("NOT_HOST", "Карту выбирает хост");
+    if (room.map.id === mapId) return;
+    room.map = GAME_MAPS[mapId];
+    for (const participant of room.players.values()) {
+      Object.assign(participant, room.map.spawnPoints[participant.slot], { ready: false, input: null });
+    }
+    this.changedRooms.add(room);
+  }
+
+  leave(playerId: string): void {
+    const room = this.membership.get(playerId);
     if (!room) return;
-    const player = room.players.get(socketId)!;
-    this.socketToRoom.delete(socketId);
-    room.players.delete(socketId);
+    const player = room.players.get(playerId)!;
+    this.membership.delete(playerId);
+    this.sessions.delete(player.sessionToken);
+    room.players.delete(playerId);
     if (!room.players.size) {
       this.rooms.delete(room.code);
       this.changedRooms.delete(room);
@@ -133,7 +192,7 @@ export class RoomStore {
     }
     if (player.isHost) room.players.values().next().value!.isHost = true;
     if (room.phase !== "lobby" && room.phase !== "ended") {
-      room.votes.delete(socketId);
+      room.votes.delete(playerId);
       this.transferTasks(room, player);
       this.checkWinner(room);
       if (room.phase === "voting" && this.allLivingVoted(room)) this.finishVoting(room, this.options.now());
@@ -141,47 +200,51 @@ export class RoomStore {
     this.changedRooms.add(room);
   }
 
-  ready(socketId: string, ready: unknown): void {
+  ready(playerId: string, ready: unknown): void {
     if (typeof ready !== "boolean") invalidPayload();
-    const [room, player] = this.member(socketId);
+    const [room, player] = this.member(playerId);
     requirePhase(room, "lobby");
     player.ready = ready;
     this.changedRooms.add(room);
   }
 
-  start(socketId: string): void {
-    const [room, host] = this.member(socketId);
+  start(playerId: string): void {
+    const [room, host] = this.member(playerId);
     requirePhase(room, "lobby");
     if (!host.isHost) throw new RoomError("NOT_HOST", "Матч может начать только хост");
     if (room.players.size < this.options.minPlayers) {
       throw new RoomError("INVALID_PLAYER_COUNT", `Нужно минимум ${this.options.minPlayers} игрока`);
     }
     const players = [...room.players.values()];
-    if (players.some((player) => !player.isHost && !player.ready)) {
-      throw new RoomError("PLAYERS_NOT_READY", "Дождитесь готовности всех остальных игроков");
+    if (players.some((player) => !player.connected || (!player.isHost && !player.ready))) {
+      throw new RoomError("PLAYERS_NOT_READY", "Дождитесь подключения и готовности всех остальных игроков");
     }
 
     const now = this.options.now();
     const ordered = this.shuffle(players);
     const impostorCount = ordered.length >= 7 ? 2 : 1;
+    const kinds = this.shuffle(TASK_TYPES);
     room.round += 1;
     room.phase = "starting";
     room.deadline = now + this.options.startingMs;
-    room.progress = { completed: 0, total: (ordered.length - impostorCount) * 2 };
+    room.progress = { completed: 0, total: (ordered.length - impostorCount) * TASKS_PER_PLAYER };
     for (const [index, player] of ordered.entries()) {
+      Object.assign(player, room.map.spawnPoints[player.slot], { input: null });
       player.role = index < impostorCount ? "impostor" : "crew";
       player.killAvailableAt = player.role === "impostor" ? room.deadline + this.options.killCooldownMs : null;
       if (player.role === "crew") {
-        player.tasks = [this.pick(WIRES), this.pick(FUEL)].map((spot, task) => ({
-          id: `${player.slot}:${task}`, spotId: spot.id, completed: false,
-        }));
+        player.tasks = Array.from({ length: TASKS_PER_PLAYER }, (_, task) => {
+          const kind = kinds[((index - impostorCount) * TASKS_PER_PLAYER + task) % kinds.length];
+          const spot = this.pick(room.map.taskSpots.filter((candidate) => candidate.kind === kind));
+          return { id: `${player.slot}:${task}`, spotId: spot.id, completed: false };
+        });
       }
     }
     this.changedRooms.add(room);
   }
 
-  returnToLobby(socketId: string): void {
-    const [room] = this.member(socketId);
+  returnToLobby(playerId: string): void {
+    const [room] = this.member(playerId);
     if (room.phase === "lobby") return;
     requirePhase(room, "ended");
     room.phase = "lobby";
@@ -194,7 +257,7 @@ export class RoomStore {
     room.voteResult = null;
     room.result = null;
     for (const player of room.players.values()) {
-      Object.assign(player, MAP.spawnPoints[player.slot], {
+      Object.assign(player, room.map.spawnPoints[player.slot], {
         alive: true, ready: false, role: null, tasks: [], challenge: null,
         killAvailableAt: null, sequence: -1, input: null, inputAt: -Infinity,
       });
@@ -202,10 +265,10 @@ export class RoomStore {
     this.changedRooms.add(room);
   }
 
-  move(socketId: string, input: unknown): void {
+  move(playerId: string, input: unknown): void {
     if (!isMoveInput(input)) invalidPayload();
-    const [room, player] = this.member(socketId);
-    requirePhase(room, "playing");
+    const [room, player] = this.member(playerId);
+    if (room.phase !== "lobby") requirePhase(room, "playing");
     requireAlive(player);
     const now = this.options.now();
     if (input.sequence <= player.sequence || now - player.inputAt < INPUT_MIN_INTERVAL_MS) {
@@ -216,25 +279,22 @@ export class RoomStore {
     player.sequence = input.sequence;
   }
 
-  interact(socketId: string, taskId: unknown): TaskChallenge {
-    const [player, task, spot] = this.checkTask(socketId, taskId);
-    const token = randomUUID();
-    const puzzle: TaskChallenge = spot.kind === "wires"
-      ? { kind: "wires", token, left: [...WIRE_COLORS], right: this.shuffle(WIRE_COLORS) }
-      : { kind: "fuel", token, holdMs: FUEL_HOLD_MS };
+  interact(playerId: string, taskId: unknown): TaskChallenge {
+    const [player, task, spot] = this.checkTask(playerId, taskId);
+    const puzzle = createChallenge(spot.kind, this.options.random);
     player.input = null;
     player.challenge = { taskId: task.id, puzzle, startedAt: this.options.now() };
     return puzzle;
   }
 
-  complete(socketId: string, taskId: unknown, proof: unknown): void {
-    const [player, task] = this.checkTask(socketId, taskId);
+  complete(playerId: string, taskId: unknown, proof: unknown): void {
+    const [player, task] = this.checkTask(playerId, taskId);
     const challenge = player.challenge;
-    if (!challenge || challenge.taskId !== task.id || !validProof(challenge, proof, this.options.now())) {
+    if (!challenge || challenge.taskId !== task.id || !acceptsAnswer(challenge.puzzle, proof, this.options.now() - challenge.startedAt)) {
       throw new RoomError("INVALID_TASK", "Начните задание и завершите его по правилам");
     }
 
-    const [room] = this.member(socketId);
+    const [room] = this.member(playerId);
     player.challenge = null;
     task.completed = true;
     room.progress.completed += 1;
@@ -243,9 +303,9 @@ export class RoomStore {
     this.changedRooms.add(room);
   }
 
-  kill(socketId: string, targetId: unknown): void {
+  kill(playerId: string, targetId: unknown): void {
     if (typeof targetId !== "string") invalidPayload();
-    const [room, player] = this.member(socketId);
+    const [room, player] = this.member(playerId);
     requirePhase(room, "playing");
     requireAlive(player);
     if (player.role !== "impostor") throw new RoomError("NOT_IMPOSTOR", "Убивать может только предатель");
@@ -255,7 +315,7 @@ export class RoomStore {
     }
     const target = room.players.get(targetId);
     if (!target?.alive || target.role !== "crew") throw new RoomError("INVALID_TARGET", "Эту цель нельзя атаковать");
-    if (!withinReach(player, target, KILL_RADIUS)) throw new RoomError("TOO_FAR", "Подойдите ближе к цели");
+    if (!withinReach(player, target, KILL_RADIUS, room.map)) throw new RoomError("TOO_FAR", "Подойдите ближе к цели");
 
     this.eliminate(room, target);
     room.bodies.push({ id: target.id, color: target.color, x: target.x, y: target.y });
@@ -264,14 +324,14 @@ export class RoomStore {
     this.changedRooms.add(room);
   }
 
-  report(socketId: string, bodyId: unknown): void {
+  report(playerId: string, bodyId: unknown): void {
     if (typeof bodyId !== "string") invalidPayload();
-    const [room, player] = this.member(socketId);
+    const [room, player] = this.member(playerId);
     requirePhase(room, "playing");
     requireAlive(player);
     const body = room.bodies.find((candidate) => candidate.id === bodyId);
     if (!body) throw new RoomError("INVALID_TARGET", "Тело не найдено");
-    if (!withinReach(player, body, REPORT_RADIUS)) throw new RoomError("TOO_FAR", "Подойдите ближе к телу");
+    if (!withinReach(player, body, REPORT_RADIUS, room.map)) throw new RoomError("TOO_FAR", "Подойдите ближе к телу");
 
     for (const participant of room.players.values()) {
       participant.input = null;
@@ -286,9 +346,9 @@ export class RoomStore {
     this.changedRooms.add(room);
   }
 
-  vote(socketId: string, targetId: unknown): void {
+  vote(playerId: string, targetId: unknown): void {
     if (targetId !== null && typeof targetId !== "string") invalidPayload();
-    const [room, player] = this.member(socketId);
+    const [room, player] = this.member(playerId);
     requirePhase(room, "voting");
     requireAlive(player);
 
@@ -308,7 +368,11 @@ export class RoomStore {
 
   tick(now = this.options.now()): void {
     for (const room of this.rooms.values()) {
-      if (room.phase === "playing") {
+      for (const player of room.players.values()) {
+        if (player.disconnectDeadline && now >= player.disconnectDeadline) this.leave(player.id);
+      }
+      if (!room.players.size) continue;
+      if (room.phase === "playing" || room.phase === "lobby") {
         this.simulate(room, now);
         continue;
       }
@@ -326,12 +390,12 @@ export class RoomStore {
     }
   }
 
-  stateFor(socketId: string): RoomState {
-    return this.publicRoom(this.member(socketId)[0], this.options.now());
+  stateFor(playerId: string): RoomState {
+    return this.publicRoom(this.member(playerId)[0], this.options.now());
   }
 
-  privateStateFor(socketId: string): PrivateState {
-    const [room, player] = this.member(socketId);
+  privateStateFor(playerId: string): PrivateState {
+    const [room, player] = this.member(playerId);
     return privatePlayer(room, player);
   }
 
@@ -342,7 +406,7 @@ export class RoomStore {
       return {
         state: this.publicRoom(room, now),
         snapshot: snapshot(room, now),
-        privateStates: [...room.players].map(([id, player]): [string, PrivateState] => [id, privatePlayer(room, player)]),
+        privateStates: [...room.players.values()].flatMap((player): Array<[string, PrivateState]> => player.connectionId ? [[player.connectionId, privatePlayer(room, player)]] : []),
         events,
       };
     });
@@ -350,8 +414,8 @@ export class RoomStore {
     return updates;
   }
 
-  playingSnapshots(now = this.options.now()): GameSnapshot[] {
-    return [...this.rooms.values()].filter((room) => room.phase === "playing").map((room) => snapshot(room, now));
+  liveSnapshots(now = this.options.now()): GameSnapshot[] {
+    return [...this.rooms.values()].filter((room) => room.phase === "playing" || room.phase === "lobby").map((room) => snapshot(room, now));
   }
 
   private simulate(room: Room, now: number): void {
@@ -360,24 +424,24 @@ export class RoomStore {
     for (const player of room.players.values()) {
       if (!player.alive || !player.input) continue;
       const until = Math.min(now, player.inputAt + INPUT_TIMEOUT_MS);
-      const to = movePosition(player, player.input, (until - since) / 1000);
+      const to = movePosition(player, player.input, (until - since) / 1000, room.map);
       player.x = to.x;
       player.y = to.y;
       const task = player.tasks.find((entry) => entry.id === player.challenge?.taskId);
-      const spot = task && TASK_SPOTS.get(task.spotId);
-      if (spot && !withinReach(player, spot, TASK_RADIUS)) player.challenge = null;
+      const spot = task && room.map.taskSpots.find((entry) => entry.id === task.spotId);
+      if (spot && !withinReach(player, spot, TASK_RADIUS, room.map)) player.challenge = null;
     }
   }
 
-  private checkTask(socketId: string, taskId: unknown): [Player, AssignedTask, TaskSpot] {
+  private checkTask(playerId: string, taskId: unknown): [Player, AssignedTask, TaskSpot] {
     if (typeof taskId !== "string") invalidPayload();
-    const [room, player] = this.member(socketId);
+    const [room, player] = this.member(playerId);
     requirePhase(room, "playing");
     requireAlive(player);
     const task = player.tasks.find((entry) => entry.id === taskId && !entry.completed);
     if (!task) throw new RoomError("INVALID_TASK", "Задание не назначено или уже завершено");
-    const spot = TASK_SPOTS.get(task.spotId)!;
-    if (!withinReach(player, spot, TASK_RADIUS)) throw new RoomError("TOO_FAR", "Подойдите ближе к панели задания");
+    const spot = room.map.taskSpots.find((entry) => entry.id === task.spotId)!;
+    if (!withinReach(player, spot, TASK_RADIUS, room.map)) throw new RoomError("TOO_FAR", "Подойдите ближе к панели задания");
     return [player, task, spot];
   }
 
@@ -426,7 +490,7 @@ export class RoomStore {
     room.meeting = null;
     room.votes.clear();
     if (!this.checkWinner(room)) {
-      for (const player of room.players.values()) Object.assign(player, MAP.spawnPoints[player.slot]);
+      for (const player of room.players.values()) Object.assign(player, room.map.spawnPoints[player.slot]);
       this.resumePlaying(room, now);
     }
     this.changedRooms.add(room);
@@ -464,26 +528,28 @@ export class RoomStore {
 
   private addPlayer(room: Room, id: string, name: string): RoomState {
     const slotsTaken = new Set([...room.players.values()].map((player) => player.slot));
-    const slot = MAP.spawnPoints.findIndex((_, index) => !slotsTaken.has(index));
-    const position = MAP.spawnPoints[slot]!;
+    const slot = room.map.spawnPoints.findIndex((_, index) => !slotsTaken.has(index));
+    const position = room.map.spawnPoints[slot]!;
     room.players.set(id, {
       id, name, slot, color: COLORS[slot]!, isHost: room.players.size === 0, ...position, ready: false,
+      connected: true, connectionId: id, sessionToken: randomUUID(), disconnectDeadline: 0,
       alive: true, role: null, sequence: -1, input: null, inputAt: -Infinity,
       tasks: [], challenge: null, killAvailableAt: null,
     });
-    this.socketToRoom.set(id, room);
+    this.membership.set(id, room);
+    this.sessions.set(room.players.get(id)!.sessionToken, id);
     this.changedRooms.add(room);
     return this.publicRoom(room, this.options.now());
   }
 
   private member(id: string): [Room, Player] {
-    const room = this.socketToRoom.get(id);
+    const room = this.membership.get(id);
     if (!room) throw new RoomError("ROOM_NOT_FOUND", "Войдите в комнату");
     return [room, room.players.get(id)!];
   }
 
-  private requireNoRoom(socketId: string): void {
-    if (this.socketToRoom.has(socketId)) throw new RoomError("ALREADY_IN_ROOM", "Сначала выйдите из текущей комнаты");
+  private requireNoRoom(playerId: string): void {
+    if (this.membership.has(playerId)) throw new RoomError("ALREADY_IN_ROOM", "Сначала выйдите из текущей комнаты");
   }
 
   private createUniqueCode(): string {
@@ -496,7 +562,7 @@ export class RoomStore {
 
   private publicRoom(room: Room, serverTime: number): RoomState {
     return {
-      code: room.code, players: [...room.players.values()].map(publicPlayer), minPlayers: this.options.minPlayers,
+      code: room.code, mapId: room.map.id, players: [...room.players.values()].map(publicPlayer), minPlayers: this.options.minPlayers,
       maxPlayers: MAX_PLAYERS, phase: room.phase, round: room.round, serverTime, meeting: room.meeting,
       progress: { ...room.progress }, voteResult: room.voteResult, result: room.result,
     };
@@ -516,8 +582,8 @@ export class RoomStore {
   }
 }
 
-function publicPlayer({ id, name, color, isHost, ready, alive }: Player): PlayerState {
-  return { id, name, color, isHost, ready, alive };
+function publicPlayer({ id, name, color, isHost, ready, alive, connected }: Player): PlayerState {
+  return { id, name, color, isHost, ready, alive, connected };
 }
 
 function privatePlayer(room: Room, player: Player): PrivateState {
@@ -530,7 +596,7 @@ function privatePlayer(room: Room, player: Player): PrivateState {
 
 function snapshot(room: Room, serverTime: number): GameSnapshot {
   return {
-    code: room.code, round: room.round, phase: room.phase, serverTime,
+    code: room.code, mapId: room.map.id, round: room.round, phase: room.phase, serverTime,
     players: [...room.players.values()].map((player) => ({
       ...publicPlayer(player), x: player.x, y: player.y, sequence: player.sequence,
     })),
@@ -573,20 +639,4 @@ function isMoveInput(value: unknown): value is MoveInput {
   const input = value as Partial<MoveInput>;
   return [input.up, input.down, input.left, input.right].every((flag) => typeof flag === "boolean")
     && typeof input.sequence === "number" && Number.isSafeInteger(input.sequence) && input.sequence >= 0;
-}
-
-function validProof(
-  { puzzle, startedAt }: NonNullable<Player["challenge"]>,
-  proof: unknown,
-  now: number,
-): boolean {
-  if (!proof || typeof proof !== "object" || !("kind" in proof) || !("token" in proof)) return false;
-  if (proof.kind !== puzzle.kind || proof.token !== puzzle.token) return false;
-  if (puzzle.kind === "fuel") return now - startedAt >= puzzle.holdMs;
-  if (!("connections" in proof) || !Array.isArray(proof.connections)) return false;
-  const connections: unknown[] = proof.connections;
-  return connections.length === puzzle.left.length && puzzle.left.every((color, index) => {
-    const destination = connections[index];
-    return typeof destination === "number" && Number.isInteger(destination) && puzzle.right[destination] === color;
-  });
 }

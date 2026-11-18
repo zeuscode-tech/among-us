@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  MAP, TASK_RADIUS, TICK_MS, collides, isInsideStation, movePosition, withinReach,
+  GAME_MAPS, MAP, TASKS, TASK_RADIUS, TICK_MS, collides, isInsideStation, movePosition, withinReach,
   type ErrorCode, type GameSnapshot, type MovementDirection, type TaskChallenge, type TaskProof, type Vec,
 } from "@among-us/shared";
+import { acceptsAnswer, createChallenge } from "./puzzles.js";
 import { RoomError, RoomStore, type GameOptions } from "./RoomStore.js";
 
 const STILL = { up: false, down: false, left: false, right: false };
@@ -33,7 +34,7 @@ function scenario(options: Partial<GameOptions> = {}) {
     store.start("p1");
     tick(100);
   };
-  const snap = (): GameSnapshot => store.playingSnapshots()[0]!;
+  const snap = (): GameSnapshot => store.liveSnapshots()[0]!;
   const position = (id: string) => snap().players.find((player) => player.id === id)!;
   const move = (id: string, direction: MovementDirection, steps = 1) => {
     for (let i = 0; i < steps; i += 1) {
@@ -61,11 +62,44 @@ function rejected(code: ErrorCode, action: () => unknown) {
 }
 
 function taskProof(challenge: TaskChallenge): TaskProof {
-  return challenge.kind === "fuel" ? { kind: "fuel", token: challenge.token } : {
-    kind: "wires", token: challenge.token, connections: challenge.left.map((color) => challenge.right.indexOf(color)),
-  };
+  const { token } = challenge;
+  switch (challenge.kind) {
+    case "spectrum":
+      return { token, answer: challenge.readings.map((_, i) => i).sort((a, b) => Math.abs(challenge.readings[a]! - challenge.reference) - Math.abs(challenge.readings[b]! - challenge.reference)) };
+    case "echo":
+      return { token, answer: [...challenge.pattern].reverse() };
+    case "balance": {
+      let remaining = challenge.target;
+      const answer = challenge.limits.map((limit) => {
+        const value = Math.min(limit, remaining);
+        remaining -= value;
+        return value;
+      });
+      return { token, answer };
+    }
+    case "orbit":
+      return { token, answer: challenge.target };
+    case "decode":
+      return { token, answer: challenge.signal.map((value) => challenge.alphabet[value]!) };
+    case "sample":
+      return { token, answer: challenge.samples.flatMap((value, i) => value.stable && value.temperature <= challenge.limit ? [i] : []) };
+    case "trace": {
+      const queue = [[challenge.start]];
+      const visited = new Set([challenge.start, ...challenge.blocked]);
+      for (const path of queue) {
+        const last = path.at(-1)!;
+        if (last === challenge.finish) return { token, answer: path };
+        for (const next of [last - 1, last + 1, last - challenge.size, last + challenge.size]) {
+          if (next < 0 || next >= challenge.size ** 2 || visited.has(next)) continue;
+          if (Math.abs(last % challenge.size - next % challenge.size) > 1) continue;
+          visited.add(next);
+          queue.push([...path, next]);
+        }
+      }
+      return assert.fail("Task has no solution");
+    }
+  }
 }
-
 function route(start: Vec, goal: (point: Vec) => boolean): MovementDirection[] {
   interface Node { point: Vec; parent: Node | null; input: MovementDirection | null }
   const key = ({ x, y }: Vec) => `${Math.round(x * 100)},${Math.round(y * 100)}`;
@@ -160,9 +194,9 @@ test("assigns one or two impostors and keeps roles, tasks, and cooldown out of p
     assert.ok(update);
     assert.equal(update.privateStates.length, size);
     assert.equal(update.privateStates.filter(([, { role }]) => role === "impostor").length, size >= 7 ? 2 : 1);
-    for (const [, own] of update.privateStates) assert.equal(own.tasks.length, own.role === "crew" ? 2 : 0);
+    for (const [, own] of update.privateStates) assert.equal(own.tasks.length, own.role === "crew" ? 3 : 0);
     for (const payload of [update.state, update.snapshot]) {
-      assert.ok(!/"(?:role|tasks|killAvailableAt|hasVoted|votes)"\s*:/.test(JSON.stringify(payload)));
+      assert.ok(!/"(?:role|tasks|killAvailableAt|hasVoted|votes|sessionToken)"\s*:/.test(JSON.stringify(payload)));
     }
   }
 });
@@ -207,40 +241,92 @@ test("checks assignment, distance, challenge, proof, and duplicate task completi
   const game = scenario();
   game.start();
   const { store, state } = game;
-  const [wires, fuel] = store.privateStateFor("p2").tasks;
-  assert.ok(wires && fuel);
-  rejected("INVALID_TASK", () => store.interact("p1", wires.id));
-  rejected("TOO_FAR", () => store.interact("p2", wires.id));
-  approach(game, "p2", wires.spotId);
-  rejected("INVALID_TASK", () => store.complete("p2", wires.id, {}));
-  const challenge = store.interact("p2", wires.id);
-  rejected("INVALID_TASK", () => store.complete("p2", wires.id, { ...taskProof(challenge), connections: [0, 0, 0, 0] }));
-  store.complete("p2", wires.id, taskProof(challenge));
-  assert.deepEqual(state().progress, { completed: 1, total: 6 });
-  assert.deepEqual(store.takeUpdates().at(-1)?.events.progress, { completed: 1, total: 6 });
-  rejected("INVALID_TASK", () => store.complete("p2", wires.id, taskProof(challenge)));
-
-  approach(game, "p2", fuel.spotId);
-  const fuelChallenge = store.interact("p2", fuel.id);
-  assert.equal(fuelChallenge.kind, "fuel");
-  rejected("INVALID_TASK", () => store.complete("p2", fuel.id, taskProof(fuelChallenge)));
-  game.tick(fuelChallenge.holdMs);
-  store.complete("p2", fuel.id, taskProof(fuelChallenge));
-  assert.equal(state().progress.completed, 2);
+  const task = store.privateStateFor("p2").tasks.at(0)!;
+  rejected("INVALID_TASK", () => store.interact("p1", task.id));
+  rejected("TOO_FAR", () => store.interact("p2", task.id));
+  approach(game, "p2", task.spotId);
+  rejected("INVALID_TASK", () => store.complete("p2", task.id, {}));
+  const challenge = store.interact("p2", task.id);
+  rejected("INVALID_TASK", () => store.complete("p2", task.id, { token: challenge.token, answer: [-1] }));
+  store.complete("p2", task.id, taskProof(challenge));
+  assert.deepEqual(state().progress, { completed: 1, total: 9 });
+  assert.deepEqual(store.takeUpdates().at(-1)?.events.progress, { completed: 1, total: 9 });
+  rejected("INVALID_TASK", () => store.complete("p2", task.id, taskProof(challenge)));
 });
 
+test("all seven custom puzzles are solvable, rejects invalid proofs and requires its own token", () => {
+  for (let seed = 0; seed < 20; seed += 1) {
+    let state = seed;
+    const random = () => ((state = (Math.imul(1664525, state) + 1013904223) >>> 0) / 2 ** 32);
+    for (const kind of Object.keys(TASKS) as Array<keyof typeof TASKS>) {
+      const puzzle = createChallenge(kind, random);
+      const proof = taskProof(puzzle);
+      assert.equal(acceptsAnswer(puzzle, proof, 5000), true, kind);
+      assert.equal(acceptsAnswer(puzzle, { ...proof, token: "other" }, 5000), false, kind);
+      assert.equal(acceptsAnswer(puzzle, { ...proof, answer: [-1] }, 5000), false, kind);
+      if (puzzle.kind === "echo") assert.equal(acceptsAnswer(puzzle, proof, puzzle.showMs - 1), false);
+    }
+  }
+});
+
+test("the lobby shares walking and ready status, and only the host can switch maps", () => {
+  const game = scenario();
+  const { store, join, state } = game;
+  join(2);
+  store.ready("p2", true);
+  const start = game.position("p2");
+  game.move("p2", RIGHT, 4);
+  assert.ok(game.position("p2").x > start.x);
+  assert.equal(state().players[1]?.ready, true);
+  rejected("NOT_HOST", () => store.selectMap("p2", "abyss"));
+  store.selectMap("p1", "abyss");
+  assert.equal(state().mapId, "abyss");
+  assert.equal(state().players[1]?.ready, false);
+  assert.equal(game.position("p2").x, GAME_MAPS.abyss.spawnPoints[1]?.x);
+  join(3);
+  game.move("p3", DOWN, 75);
+  assert.ok(game.position("p3").y > 1100, "the selected map's central corridor reaches the archive");
+  assert.ok(isInsideStation(game.position("p3"), GAME_MAPS.abyss));
+});
+
+test("session survives disconnection, blocks start while a guest is offline and expires safely", () => {
+  const game = scenario({ minPlayers: 2, sessionGraceMs: 1000 });
+  const { store, join, state, tick } = game;
+  join(2);
+  store.ready("p2", true);
+  game.move("p2", RIGHT, 3);
+  const position = game.position("p2");
+  const token = store.tokenFor("p2");
+  store.disconnect("p2", "p2");
+  assert.equal(state().players[1]?.connected, false);
+  rejected("PLAYERS_NOT_READY", () => store.start("p1"));
+  const restored = store.resume(token, "next-socket");
+  assert.equal(restored.playerId, "p2");
+  assert.equal(restored.snapshot.players[1]?.x, position.x);
+  assert.equal(restored.room.players[1]?.ready, true);
+  assert.equal(store.ownsConnection("p2", "next-socket"), true);
+  store.disconnect("p2", "p2");
+  assert.equal(state().players[1]?.connected, true);
+  store.disconnect("p2", "next-socket");
+  tick(1000);
+  rejected("SESSION_EXPIRED", () => store.resume(token, "too-late"));
+  assert.equal(state().players.length, 1);
+});
 test("crew wins after every required task is finished", () => {
   const game = scenario();
   game.start();
+  const completedKinds = new Set<string>();
   for (const id of ["p2", "p3", "p4"]) {
     for (const task of game.store.privateStateFor(id).tasks) {
       approach(game, id, task.spotId);
       const challenge = game.store.interact(id, task.id);
-      if (challenge.kind === "fuel") game.tick(challenge.holdMs);
+      completedKinds.add(challenge.kind);
+      if (challenge.kind === "echo") game.tick(challenge.showMs);
       game.store.complete(id, task.id, taskProof(challenge));
     }
   }
-  assert.deepEqual(game.state().progress, { completed: 6, total: 6 });
+  assert.equal(completedKinds.size, 7);
+  assert.deepEqual(game.state().progress, { completed: 9, total: 9 });
   assert.equal(game.state().result?.winner, "crew");
   assert.equal(game.state().result?.reason, "tasks");
 });
@@ -260,9 +346,9 @@ test("kill checks role, distance, target and cooldown, creates a body and transf
   assert.equal(snap().bodies[0]?.id, "p2");
   assert.equal(snap().bodies[0]?.color, state().players[1]?.color);
   assert.equal(store.privateStateFor("p2").tasks.length, 0);
-  assert.equal(store.privateStateFor("p3").tasks.length, 3);
-  assert.equal(store.privateStateFor("p4").tasks.length, 3);
-  assert.equal(state().progress.total, 6);
+  assert.equal(store.privateStateFor("p3").tasks.length, 5);
+  assert.equal(store.privateStateFor("p4").tasks.length, 4);
+  assert.equal(state().progress.total, 9);
   rejected("PLAYER_DEAD", () => store.move("p2", { ...RIGHT, sequence: 0 }));
   rejected("COOLDOWN", () => store.kill("p1", "p3"));
 });
@@ -411,4 +497,29 @@ test("returning to the lobby clears match state and permits another round in the
   assert.equal(state().round, 2);
   assert.equal(snap().bodies.length, 0);
   assert.ok(snap().players.every(({ sequence }) => sequence === -1));
+});
+
+test("session resumes during voting with the same ballot, role and life state", () => {
+  const game = scenario();
+  game.start();
+  game.meeting();
+  game.tick(200);
+  game.store.vote("p3", "p1");
+  const token = game.store.tokenFor("p3");
+  game.store.disconnect("p3", "p3");
+  const resumed = game.store.resume(token, "replacement-socket");
+  assert.equal(resumed.room.phase, "voting");
+  assert.equal(resumed.privateState.role, "crew");
+  assert.equal(resumed.privateState.hasVoted, true);
+  assert.equal(resumed.snapshot.players.find((player) => player.id === "p3")?.alive, true);
+  rejected("ALREADY_VOTED", () => game.store.vote("p3", null));
+
+  const victimToken = game.store.tokenFor("p2");
+  game.store.disconnect("p2", "p2");
+  const victim = game.store.resume(victimToken, "victim-socket");
+  assert.equal(victim.snapshot.players.find((player) => player.id === "p2")?.alive, false);
+  rejected("PLAYER_DEAD", () => game.store.vote("p2", "p1"));
+  game.store.vote("p1", null);
+  game.store.vote("p4", "p1");
+  assert.equal(game.state().result?.winner, "crew");
 });

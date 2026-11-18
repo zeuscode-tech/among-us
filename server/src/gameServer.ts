@@ -40,19 +40,23 @@ export function createGameServer(options: ServerOptions = {}) {
   const timer = setInterval(() => {
     rooms.tick();
     const published = publish();
-    for (const snapshot of rooms.playingSnapshots()) {
+    for (const snapshot of rooms.liveSnapshots()) {
       if (!published.has(snapshot.code)) io.to(channel(snapshot.code)).volatile.emit(EVENTS.GAME_SNAPSHOT, snapshot);
     }
   }, TICK_MS);
   timer.unref();
 
   io.on("connection", (socket) => {
-    const id = socket.id;
+    let id = socket.id;
     const leave = () => {
-      const code = rooms.roomCodeFor(id);
+      const code = rooms.ownsConnection(id, socket.id) && rooms.roomCodeFor(id);
       if (code) void socket.leave(channel(code));
-      rooms.leave(id);
+      if (rooms.ownsConnection(id, socket.id)) rooms.leave(id);
+      id = socket.id;
       return null;
+    };
+    const memberOnly = () => {
+      if (!rooms.ownsConnection(id, socket.id)) throw new RoomError("ROOM_NOT_FOUND", "Войдите в комнату");
     };
     const command = <T>(ack: Acknowledge<T> | undefined, action: () => T) => {
       respond(ack, action);
@@ -61,51 +65,77 @@ export function createGameServer(options: ServerOptions = {}) {
     socket.on(EVENTS.ROOM_CREATE, (request, ack) => command(ack, () => {
       const room = rooms.create(id, request?.playerName);
       void socket.join(channel(room.code));
-      return { room, playerId: id };
+      return { room, playerId: id, sessionToken: rooms.tokenFor(id) };
     }));
     socket.on(EVENTS.ROOM_JOIN, (request, ack) => command(ack, () => {
       const room = rooms.join(id, request?.roomCode, request?.playerName);
       void socket.join(channel(room.code));
-      return { room, playerId: id };
+      return { room, playerId: id, sessionToken: rooms.tokenFor(id) };
+    }));
+    socket.on(EVENTS.ROOM_RESUME, (request, ack) => command(ack, () => {
+      if (rooms.ownsConnection(id, socket.id) && request?.sessionToken !== rooms.tokenFor(id)) {
+        throw new RoomError("ALREADY_IN_ROOM", "Вы уже в комнате");
+      }
+      const { previous, ...membership } = rooms.resume(request?.sessionToken, socket.id);
+      id = membership.playerId;
+      void socket.join(channel(membership.room.code));
+      if (previous && previous !== socket.id) io.sockets.sockets.get(previous)?.disconnect(true);
+      return membership;
+    }));
+    socket.on(EVENTS.ROOM_MAP, (request, ack) => command(ack, () => {
+      memberOnly();
+      rooms.selectMap(id, request?.mapId);
+      return null;
     }));
     socket.on(EVENTS.ROOM_LEAVE, (ack) => command(ack, leave));
     socket.on(EVENTS.PLAYER_READY, (request, ack) => command(ack, () => {
+      memberOnly();
       rooms.ready(id, request?.ready);
       return null;
     }));
     socket.on(EVENTS.GAME_START, (ack) => command(ack, () => {
+      memberOnly();
       rooms.start(id);
       return null;
     }));
     socket.on(EVENTS.GAME_RETURN, (ack) => command(ack, () => {
+      memberOnly();
       rooms.returnToLobby(id);
       return null;
     }));
     socket.on(EVENTS.PLAYER_MOVE, (input, ack) => respond(ack, () => {
+      memberOnly();
       rooms.move(id, input);
       return null;
     }));
-    socket.on(EVENTS.TASK_INTERACT, (request, ack) => respond(ack, () => rooms.interact(id, request?.taskId)));
+    socket.on(EVENTS.TASK_INTERACT, (request, ack) => respond(ack, () => {
+      memberOnly();
+      return rooms.interact(id, request?.taskId);
+    }));
     socket.on(EVENTS.TASK_COMPLETE, (request, ack) => command(ack, () => {
+      memberOnly();
       rooms.complete(id, request?.taskId, request?.proof);
       return null;
     }));
     socket.on(EVENTS.PLAYER_KILL, (request, ack) => command(ack, () => {
+      memberOnly();
       rooms.kill(id, request?.targetId);
       return null;
     }));
     socket.on(EVENTS.BODY_REPORT, (request, ack) => command(ack, () => {
+      memberOnly();
       rooms.report(id, request?.bodyId);
       return null;
     }));
     socket.on(EVENTS.VOTE_CAST, (request, ack) => command(ack, () => {
       if (!request || !("targetId" in Object(request))) invalidPayload();
+      memberOnly();
       rooms.vote(id, request.targetId);
       socket.emit(EVENTS.PLAYER_PRIVATE_STATE, rooms.privateStateFor(id));
       return null;
     }));
     socket.on("disconnect", () => {
-      leave();
+      rooms.disconnect(id, socket.id);
       publish();
     });
   });

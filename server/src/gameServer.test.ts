@@ -3,13 +3,13 @@ import { once } from "node:events";
 import test from "node:test";
 import { io, type Socket } from "socket.io-client";
 import {
-  EVENTS, type ClientEvents, type GameAck, type GameSnapshot, type PrivateState, type RoomMembership, type ServerEvents,
+  EVENTS, type ClientEvents, type GameAck, type GameSnapshot, type PrivateState, type RoomMembership, type ResumedMembership, type ServerEvents,
 } from "@among-us/shared";
 import { createGameServer } from "./gameServer.js";
 
 type Client = Socket<ServerEvents, ClientEvents>;
 
-test("Socket.IO smoke: create, join, ready, start, private roles, snapshots, movement, disconnect", { timeout: 10_000 }, async (t) => {
+test("Socket.IO smoke: create, join, ready, start, private roles, snapshots, movement, session resume and leave", { timeout: 10_000 }, async (t) => {
   const { httpServer, close } = createGameServer({ game: { startingMs: 150, random: () => 0.9999 } });
   const clients: Client[] = [];
   t.after(async () => {
@@ -38,9 +38,11 @@ test("Socket.IO smoke: create, join, ready, start, private roles, snapshots, mov
   assert.ok(membership.ok);
   const code = membership.data.room.code;
 
+  const sessionTokens: string[] = [];
   for (const [index, client] of clients.slice(1).entries()) {
-    const joined = await client.timeout(1500).emitWithAck(EVENTS.ROOM_JOIN, { playerName: `Crew ${index}`, roomCode: code });
+    const joined: GameAck<RoomMembership> = await client.timeout(1500).emitWithAck(EVENTS.ROOM_JOIN, { playerName: `Crew ${index}`, roomCode: code });
     assert.ok(joined.ok);
+    sessionTokens.push(joined.data.sessionToken);
     assert.deepEqual(await client.timeout(1500).emitWithAck(EVENTS.PLAYER_READY, { ready: true }), { ok: true, data: null });
   }
 
@@ -55,7 +57,7 @@ test("Socket.IO smoke: create, join, ready, start, private roles, snapshots, mov
   assert.deepEqual(await host.timeout(1500).emitWithAck(EVENTS.GAME_START), { ok: true, data: null });
   const privateStates = await Promise.all(roles);
   assert.deepEqual(privateStates.map(({ role }) => role), ["impostor", "crew", "crew", "crew"]);
-  assert.deepEqual(privateStates.map(({ tasks }) => tasks.length), [0, 2, 2, 2]);
+  assert.deepEqual(privateStates.map(({ tasks }) => tasks.length), [0, 3, 3, 3]);
 
   const initial = await playing;
   assert.equal(initial.players.length, 4);
@@ -72,11 +74,35 @@ test("Socket.IO smoke: create, join, ready, start, private roles, snapshots, mov
   }), { ok: true, data: null });
   assert.equal((await moved).players.find(({ id }) => id === mover.id)?.sequence, 0);
 
+  const moverId = mover.id;
+  const offline = waitFor<GameSnapshot>((listener) => {
+    host.on(EVENTS.GAME_SNAPSHOT, listener);
+    return () => host.off(EVENTS.GAME_SNAPSHOT, listener);
+  }, (snapshot) => snapshot.players.some((player) => player.id === moverId && !player.connected));
+  mover.disconnect();
+  await offline;
+  const reconnected = new Promise<void>((resolve) => mover.once("connect", resolve));
+  mover.connect();
+  await reconnected;
+  assert.notEqual(mover.id, moverId);
+  const restored: GameAck<ResumedMembership> = await mover.timeout(1500).emitWithAck(EVENTS.ROOM_RESUME, {
+    sessionToken: sessionTokens[0]!,
+  });
+  assert.ok(restored.ok);
+  assert.equal(restored.data.playerId, moverId);
+  assert.equal(restored.data.privateState.role, "crew");
+  const retried: GameAck<ResumedMembership> = await mover.timeout(1500).emitWithAck(EVENTS.ROOM_RESUME, {
+    sessionToken: sessionTokens[0]!,
+  });
+  assert.ok(retried.ok);
+  assert.equal(retried.data.playerId, moverId);
+  assert.equal(restored.data.snapshot.players.find((player) => player.id === moverId)?.sequence, 0);
+
   const departed = waitFor<GameSnapshot>((listener) => {
     host.on(EVENTS.GAME_SNAPSHOT, listener);
     return () => host.off(EVENTS.GAME_SNAPSHOT, listener);
   }, (snapshot) => snapshot.players.length === 3);
-  mover.disconnect();
+  assert.ok((await mover.timeout(1500).emitWithAck(EVENTS.ROOM_LEAVE)).ok);
   assert.equal((await departed).players.length, 3);
 });
 

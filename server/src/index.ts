@@ -12,6 +12,7 @@ const server = createGameServer({
     minPlayers: integerEnv("MIN_PLAYERS", defaults.minPlayers, 2, 10),
     discussionMs: integerEnv("DISCUSSION_DURATION_MS", defaults.discussionMs, 100, 600_000),
     votingMs: integerEnv("VOTING_DURATION_MS", defaults.votingMs, 100, 600_000),
+    sessionGraceMs: integerEnv("SESSION_GRACE_MS", defaults.sessionGraceMs, 250, 600_000),
     killCooldownMs: integerEnv("KILL_COOLDOWN_MS", defaults.killCooldownMs, 0, 600_000),
   },
 });
